@@ -1,0 +1,46 @@
+# CompileFlags:
+#   Compiler: clang++
+
+  # Add: [
+  #   "-xcuda",
+  #   "-nocudalib",                                 # don't use internal libcuda
+  #   "--cuda-path=/nix/store/k370ii4q47v3ch1y75dbghj9zcz4yfjn-cuda-merged-12.8",
+  #   "--cuda-gpu-arch=sm_52",
+  #
+  #   # FORCE clangd to use system C++ toolchain (this is the key)
+  #   "--gcc-toolchain=/nix/store/$(readlink /run/current-system/sw/bin/cc | sed 's/\/bin\/cc//')",
+  #
+  #   # Include paths manually
+  #   "-I/usr/include",
+  #   "-I/usr/include/c++/v1"
+  # ]
+
+# Diagnostics:
+#   Suppress: ["unused-includes", "unknown-warning-option"]
+
+CompileFlags:
+  Add: 
+    - -Wall
+    - -Wextra
+  Remove:
+    - -ccbin
+    - -forward-unknown-to-host-compiler
+    - --generate-code*
+    - -arch*
+    - -rdc=true
+    - -Xcudafe
+    - --diag_suppress=*
+    - --expt-relaxed-constexpr
+    - --expt-extended-lambda
+    - -Xcompiler*
+    - -fmodules*
+    - -fmodule-mapper*
+    - -fdeps-format*
+
+---
+
+If:
+  PathMatch: [.*\.cu, .*\.cuh]
+CompileFlags:
+  Add: 
+    - --cuda-gpu-arch=sm_89
