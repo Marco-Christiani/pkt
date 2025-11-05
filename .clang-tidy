@@ -4,7 +4,7 @@ Checks: >
   clang-analyzer-*,
   modernize-*,
   performance-*,
-  # readability-*,
+  readability-*,
   -modernize-use-trailing-return-type,
   -readability-identifier-length,
   -readability-function-cognitive-complexity,
@@ -12,7 +12,10 @@ Checks: >
   -readability-isolate-declaration,
   -bugprone-easily-swappable-parameters,
   -bugprone-reserved-identifier,
-  -bugprone-narrowing-conversions
+  -readability-implicit-bool-conversion,
+  -readability-uppercase-literal-suffix,
+  -bugprone-narrowing-conversions,
+  -bugprone-exception-escape
 
 WarningsAsErrors: ''
 
@@ -35,10 +38,18 @@ CheckOptions:
     value: lower_case
   - key: readability-identifier-naming.EnumConstantCase
     value: UPPER_CASE
+  # Allow GPU/ML naming conventions: matrix dims (M, N, K), tensors (X, Y, W),
+  # shared memory prefix (s_*), gradients (d*), targets (*_target), constants (TILE_*)
+  - key: readability-identifier-naming.VariableIgnoredRegexp
+    value: '^[MNKXYWHW][0-9]?$|^s_[A-Za-z0-9]+$|^d[A-Z][A-Za-z0-9]*$|^.*_target$|^.*_out$|^TILE_[A-Z]+$'
+  - key: readability-identifier-naming.ParameterIgnoredRegexp
+    value: '^[MNKXYWHW][0-9]?$|^.*_target$|^.*_out$'
   - key: modernize-loop-convert.MinConfidence
     value: reasonable
   - key: modernize-use-nullptr.NullMacros
     value: 'NULL'
   - key: performance-for-range-copy.WarnOnAllAutoCopies
     value: true
+  - key: readability-braces-around-statements.ShortStatementLines
+    value: '1'
 ...
