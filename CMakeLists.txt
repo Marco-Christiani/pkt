@@ -27,13 +27,6 @@ add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math")
 
 # -------------------------------------------------------------
-# Libs
-# -------------------------------------------------------------
-add_library(megakernel_builder src/megakernel_builder.cpp)
-set_target_properties(megakernel_builder PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(megakernel_builder PUBLIC src)
-
-# -------------------------------------------------------------
 # Exe tgts
 # -------------------------------------------------------------
 add_executable(vadd src/vadd.cu)
