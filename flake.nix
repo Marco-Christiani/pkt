@@ -1,6 +1,7 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/28ace32529a63842e4f8103e4f9b24960cf6c23a";
+    # nixpkgs.url = "github:NixOS/nixpkgs/28ace32529a63842e4f8103e4f9b24960cf6c23a";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -71,11 +72,16 @@
             meson
 
             cudaPackages.cuda_cudart # includes libcudart_static.a
+            cudaPackages.cutlass
           ];
 
           LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             cudaPackages.cuda_cudart
           ];
+
+          CPATH = pkgs.lib.makeSearchPath "include" [
+              cudaPackages.cutlass
+            ];
 
           shellHook = ''
                         # for cmake/nvcc detection
@@ -87,6 +93,8 @@
             EOF
 
                         echo 'CUDA toolkit version: ${cudaPackages.cudatoolkit.version}'
+                        echo 'CUTLASS: ${cudaPackages.cutlass.version}'
+                        echo 'CUTLASS: ${cudaPackages.cutlass}'
           '';
         };
       }
