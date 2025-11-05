@@ -41,13 +41,6 @@ add_executable(phasebits_demo src/phasebits_demo.cpp)
 add_executable(phasebits_demo_threaded src/phasebits_demo_threaded.cpp)
 add_executable(mlp_cpu src/mlp_cpu.cpp)
 add_executable(mlp src/mlp.cu)
-add_executable(linear_train_nowarpspec src/linear_train_nowarpspec.cu)
-add_executable(linear_train_warp_spec src/linear_train_warp_spec.cu)
-add_executable(train_mlp_pk src/train_mlp_pk.cu)
-add_executable(test_builder src/test_builder.cu)
-add_executable(mlp_megakernel src/mlp_megakernel.cu)
-add_executable(mlp_train_megakernel src/mlp_train_megakernel.cu)
-add_executable(mlp_train_simple src/mlp_train_simple.cu)
 
 message(STATUS "CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES: ${CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES}")
 
