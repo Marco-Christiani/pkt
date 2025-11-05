@@ -25,11 +25,6 @@ executable('phasebits_demo', ['src/phasebits_demo.cpp'])
 executable('phasebits_demo_threaded', ['src/phasebits_demo_threaded.cpp'])
 executable('mlp_cpu', ['src/mlp_cpu.cpp'])
 
-executable(
-  'mlp',
-  ['src/mlp.cu'],
-  link_with: megakernel_builder,
-)
 
 # CUTLASS+CUTE tgt
 executable(

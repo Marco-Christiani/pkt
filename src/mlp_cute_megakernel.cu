@@ -9,218 +9,212 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 
-template <class T> __device__ __forceinline__ T clamp_to_zero(T x) {
-  return x > T(0) ? x : T(0);
-}
-
-__device__ __forceinline__ float bf16_to_f32(__nv_bfloat16 x) {
-  return __bfloat162float(x);
-}
-
-__device__ __forceinline__ __nv_bfloat16 f32_to_bf16(float x) {
-  return __float2bfloat16(x);
-}
-
 using OpBF16TN = cute::SM80_16x8x16_F32BF16BF16F32_TN;
 using AtomBF16TN = cute::MMA_Atom<OpBF16TN>;
 
 // -------------------------------------------
-// C += A * B^T, with
-//   A: (TM, TK) bf16
-//   B: (TN, TK) bf16
-//   C: (TM, TN) f32
+// Generic tiled GEMM: C (f32) += A (bf16) @ B^T (bf16)
+// Accumulates across K dimension
 // -------------------------------------------
-template <int TM, int TN, int TK> struct WarpGemmBF16TN {
-  __device__ inline void operator()(__nv_bfloat16* A_ptr, int lda, __nv_bfloat16* B_ptr, int ldb,
-                                    float* C_ptr, int ldc) const {
+template <int TM, int TN, int TK> struct TiledGemmBF16TN {
+  __nv_bfloat16* A_base;
+  int ldA;
+  __nv_bfloat16* B_base;
+  int ldB;
+  float* C_base;
+  int ldC;
+  int K_full; // Full K dimension to loop over
+
+  __device__ inline void run_tile(int m0, int n0) const {
     auto mma = cute::make_tiled_mma(AtomBF16TN{});
     auto thr_mma = mma.get_slice(threadIdx.x);
 
-    // Full views
-    auto gA = cute::make_tensor(cute::make_gmem_ptr(A_ptr),
-                                cute::make_shape(cute::Int<TM>{}, cute::Int<TK>{}),
-                                cute::make_stride(lda, cute::Int<1>{})); // (M,K)
-
-    auto gB = cute::make_tensor(cute::make_gmem_ptr(B_ptr),
-                                cute::make_shape(cute::Int<TN>{}, cute::Int<TK>{}),
-                                cute::make_stride(ldb, cute::Int<1>{})); // (N,K)
-
-    auto gC = cute::make_tensor(cute::make_gmem_ptr(C_ptr),
+    // Create view of C tile
+    auto gC = cute::make_tensor(cute::make_gmem_ptr(C_base + m0 * ldC + n0),
                                 cute::make_shape(cute::Int<TM>{}, cute::Int<TN>{}),
-                                cute::make_stride(ldc, cute::Int<1>{})); // (M,N)
+                                cute::make_stride(ldC, cute::Int<1>{}));
 
-    // Thread fragments
-    auto fragA = thr_mma.partition_fragment_A(gA); // (MMA,mma_M,mma_K)
-    auto fragB = thr_mma.partition_fragment_B(gB); // (MMA,mma_N,mma_K)
-    auto tCgC = thr_mma.partition_C(gC);           // (MMA,mma_M,mma_N)
-    auto fragC = thr_mma.make_fragment_C(tCgC);    // (MMA,mma_M,mma_N)
+    auto tCgC = thr_mma.partition_C(gC);
+    auto fragC = thr_mma.make_fragment_C(tCgC);
+    cute::clear(fragC); // Initialize accumulator
 
-    // Load & compute (C = C + A*B^T)
-    // C is used as is, init'd by caller aka 'future me'
-    cute::copy(gA, fragA);
-    cute::copy(gB, fragB);
-    cute::gemm(mma, fragA, fragB, fragC);
-    cute::copy(fragC, gC);
+    // Loop over K dimension
+    for (int k0 = 0; k0 < K_full; k0 += TK) {
+      // Create views of A and B tiles for this K slice
+      auto gA = cute::make_tensor(cute::make_gmem_ptr(A_base + m0 * ldA + k0),
+                                  cute::make_shape(cute::Int<TM>{}, cute::Int<TK>{}),
+                                  cute::make_stride(ldA, cute::Int<1>{}));
+
+      auto gB = cute::make_tensor(cute::make_gmem_ptr(B_base + n0 * ldB + k0),
+                                  cute::make_shape(cute::Int<TN>{}, cute::Int<TK>{}),
+                                  cute::make_stride(ldB, cute::Int<1>{}));
+
+      // Partition and load
+      auto fragA = thr_mma.partition_fragment_A(gA);
+      auto fragB = thr_mma.partition_fragment_B(gB);
+
+      cute::copy(gA, fragA);
+      cute::copy(gB, fragB);
+
+      // Accumulate
+      cute::gemm(mma, fragA, fragB, fragC);
+    }
+
+    // Store result
+    cute::copy(fragC, tCgC);
   }
 };
 
 // -------------------------------------------
-// DAG ops
+// Convert float tile to bf16
 // -------------------------------------------
-
-// Fwd gemm: H = X @ W0^T (bf16xbf16->f32), tile (TMxTN) from (BxH)
-template <int TM, int TN, int TK> struct FwdGemm_X_W0T {
-  __nv_bfloat16* X;
-  int ldX; // [B, In]
-  __nv_bfloat16* W0;
-  int ldW0; // [H, In]  (row major HxIn)
-  float* H;
-  int ldH; // [B, H]   (f32 accum)
+template <int TM, int TN> struct TiledF32ToBF16 {
+  float* src;
+  int ld_src;
+  __nv_bfloat16* dst;
+  int ld_dst;
 
   __device__ inline void run_tile(int m0, int n0) const {
-    // C_tile = A_tile * B_tile^T
-    // A_tile: X(m0:m0+TM, 0:TK)
-    // B_tile: W0(n0:n0+TN, 0:TK)
-    WarpGemmBF16TN<TM, TN, TK>{}(X + m0 * ldX, ldX, W0 + n0 * ldW0, ldW0, H + m0 * ldH + n0, ldH);
-  }
-};
+    for (int i = threadIdx.x; i < TM * TN; i += 32) {
+      int r = i / TN;
+      int c = i % TN;
+      int row = m0 + r;
+      int col = n0 + c;
 
-// ReLU in-place on H (f32)
-struct ReLUInplace {
-  float* H;
-  int ldH;
-  int B, Hdim;
-  __device__ inline void run_tile(int m0, int n0, int TM, int TN) const {
-    // elementwise on (TMxTN) tile
-    for (int i = threadIdx.x; i < TM * TN; i += blockDim.x) {
-      int r = i / TN;     // [0..TM)
-      int c = i - r * TN; // [0..TN)
-      float* p = H + (m0 + r) * ldH + (n0 + c);
-      float v = *p;
-      *p = v > 0.f ? v : 0.f;
+      float val = src[row * ld_src + col];
+      dst[row * ld_dst + col] = __float2bfloat16(val);
     }
   }
 };
 
-// Output gemm: Y = H @ W1^T  -> (BxOut), f32 accum
-template <int TM, int TN, int TK> struct FwdGemm_H_W1T {
-  float* H;
-  int ldH; // [B, H], f32
-  __nv_bfloat16* W1;
-  int ldW1; // [Out, H], bf16
-  float* Y;
-  int ldY; // [B, Out], f32
+// -------------------------------------------
+// Elementwise ReLU on a f32 tile
+// -------------------------------------------
+template <int TM, int TN> struct TiledReLU {
+  float* data;
+  int ld;
 
   __device__ inline void run_tile(int m0, int n0) const {
-    WarpGemmBF16TN<TM, TN, TK>{}(reinterpret_cast<__nv_bfloat16*>(H + m0 * ldH), /*lda*/ ldH,
-                                 W1 + n0 * ldW1, /*ldb*/ ldW1, Y + m0 * ldY + n0, /*ldc*/ ldY);
+    for (int i = threadIdx.x; i < TM * TN; i += 32) {
+      int r = i / TN;
+      int c = i % TN;
+      int row = m0 + r;
+      int col = n0 + c;
+
+      float* ptr = data + row * ld + col;
+      float val = *ptr;
+      *ptr = val > 0.f ? val : 0.f;
+    }
+  }
+};
+
+// -------------------------------------------
+// MLP Forward Pass for one tile
+// H (f32) = ReLU(X (bf16) @ W0^T (bf16))
+// H_bf16 = convert(H)
+// Y (f32) = H_bf16 @ W1^T (bf16)
+// -------------------------------------------
+template <int TM, int TN, int TK> struct MLPForward {
+  // Input dimensions
+  int B, In, Hdim, Out;
+
+  // Input data (bf16)
+  __nv_bfloat16* X;
+  int ldX; // [B, In]
+  __nv_bfloat16* W0;
+  int ldW0; // [Hdim, In]
+  __nv_bfloat16* W1;
+  int ldW1; // [Out, Hdim]
+
+  // Scratch (f32 for accumulation, bf16 for second gemm input)
+  float* H;
+  int ldH; // [B, Hdim] f32
+  __nv_bfloat16* H_bf16;
+  int ldH_bf16; // [B, Hdim] bf16
+  float* Y;
+  int ldY; // [B, Out] f32
+
+  __device__ inline void run_tile(int m0, int n0_max) const {
+    // First GEMM: H = X @ W0^T
+    for (int n0 = 0; n0 < Hdim; n0 += TN) {
+      if (n0 >= n0_max)
+        break;
+
+      TiledGemmBF16TN<TM, TN, TK>{
+          X, ldX, W0, ldW0, H, ldH,
+          In // K dimension
+      }
+          .run_tile(m0, n0);
+
+      __syncwarp();
+
+      // ReLU in-place
+      TiledReLU<TM, TN>{H, ldH}.run_tile(m0, n0);
+
+      __syncwarp();
+
+      // Convert to bf16 for next gemm
+      TiledF32ToBF16<TM, TN>{H, ldH, H_bf16, ldH_bf16}.run_tile(m0, n0);
+
+      __syncwarp();
+    }
+
+    // Second GEMM: Y = H_bf16 @ W1^T
+    for (int n0 = 0; n0 < Out; n0 += TN) {
+      if (n0 >= n0_max)
+        break;
+
+      TiledGemmBF16TN<TM, TN, TK>{
+          H_bf16, ldH_bf16, W1, ldW1, Y, ldY,
+          Hdim // K dimension
+      }
+          .run_tile(m0, n0);
+
+      __syncwarp();
+    }
   }
 };
 
 // -------------------------------------------
 // KERNEL
 // -------------------------------------------
-
 template <int TM, int TN, int TK>
-__global__ void mlp_kernel(
-    // Dims and stuff
-    int B, int In, int Hdim, int Out,
-
-    // Data
-    __nv_bfloat16* X, int ldX,   // [B, In]
-    __nv_bfloat16* W0, int ldW0, // [H, In]
-    __nv_bfloat16* W1, int ldW1, // [Out, H]
-    __nv_bfloat16* Yb, int ldYb, // [B, Out] (bf16 out)
-    float* T, int ldT,           // [B, Out] (target, f32)
-
-    // Scratch / accumulators
-    float* H, int ldH,     // [B, H]   (fwd activations, f32)
-    float* Y, int ldY,     // [B, Out] (fwd output, f32)
-    float* dY, int ldDY,   // [B, Out] (grad, f32)
-    float* dH, int ldDH,   // [B, H]   (grad, f32)
-    float* dW0, int lddW0, // [H, In]  (grad, f32)
-    float* dW1, int lddW1, // [Out, H] (grad, f32)
-
-    // Optim
-    float lr) {
-  // each block handles one output tile (n0) and one batch tile (m0)
-  int warp_idx = threadIdx.x / 32;
-  if (warp_idx != 0)
-    return; // single-warp per block... stupid? idk, just work first.
-
-  int m0 = blockIdx.y * TM; // batch tile offset
-  int n0 = blockIdx.x * TN; // feature/out tile offset
-
-  // Bounds guard (assumes multiples keep anyway)
-  if (m0 >= B || n0 >= max(Hdim, Out))
+__global__ void mlp_kernel(int B, int In, int Hdim, int Out, __nv_bfloat16* X, int ldX,
+                           __nv_bfloat16* W0, int ldW0, __nv_bfloat16* W1, int ldW1, float* H,
+                           int ldH, __nv_bfloat16* H_bf16, int ldH_bf16, float* Y, int ldY) {
+  if (threadIdx.x >= 32)
     return;
 
-  // Fwd: H = X W0^T
-  {
-    // zero H tile
-    for (int i = threadIdx.x; i < TM * TN; i += blockDim.x) {
-      int r = i / TN;
-      int c = i - r * TN;
-      if (n0 + c < Hdim && m0 + r < B)
-        *(H + (m0 + r) * ldH + (n0 + c)) = 0.f;
-    }
-    __syncwarp();
+  int m0 = blockIdx.y * TM;
+  int n0 = blockIdx.x * TN;
 
-    // Sweep K dimension (In) in TK steps
-    for (int k0 = 0; k0 < In; k0 += TK) {
-      FwdGemm_X_W0T<TM, TN, TK>{X + m0 * ldX + k0, ldX, W0 + n0 * ldW0 + k0, ldW0,
-                                H + m0 * ldH + n0, ldH}
-          .run_tile(0, 0);
-    }
+  if (m0 >= B)
+    return;
 
-    ReLUInplace{H, ldH, B, Hdim}.run_tile(m0, n0, TM, TN);
-  }
-
-  // Fwd: Y = H W1^T
-  {
-    // Init Y tile
-    for (int i = threadIdx.x; i < TM * TN; i += blockDim.x) {
-      int r = i / TN;
-      int c = i - r * TN;
-      if (n0 + c < Out && m0 + r < B)
-        *(Y + (m0 + r) * ldY + (n0 + c)) = 0.f;
-    }
-    __syncwarp();
-
-    for (int k0 = 0; k0 < Hdim; k0 += TK) {
-      FwdGemm_H_W1T<TM, TN, TK>{H + m0 * ldH + k0, ldH, W1 + n0 * ldW1 + k0, ldW1,
-                                Y + m0 * ldY + n0, ldY}
-          .run_tile(0, 0);
-    }
-  }
-
-  // {
-  //   //Y -> bf16
-  //   StoreCastBF16{Y, ldY, Yb, ldYb, B, Out}.run_tile(m0, n0, TM, TN);
-  // }
+  MLPForward<TM, TN, TK>{B,  In,   Hdim, Out, X,      ldX,      W0, ldW0,
+                         W1, ldW1, H,    ldH, H_bf16, ldH_bf16, Y,  ldY}
+      .run_tile(m0, n0);
 }
 
+// -------------------------------------------
+// LAUNCHER
+// -------------------------------------------
 template <int TM, int TN, int TK>
-void launch_mlp_kernel(dim3 grid, dim3 block, int B, int In, int Hdim, int Out,
-                                     __nv_bfloat16* X, int ldX, __nv_bfloat16* W0, int ldW0,
-                                     __nv_bfloat16* W1, int ldW1, __nv_bfloat16* Yb, int ldYb,
-                                     float* T, int ldT, float* H, int ldH, float* Y, int ldY,
-                                     float* dY, int ldDY, float* dH, int ldDH, float* dW0,
-                                     int lddW0, float* dW1, int lddW1, float lr,
-                                     cudaStream_t stream) {
-  // compile-time tile constraints
-  static_assert(TM == 16 && TN == 8 && TK == 16,
-                "This example hard-codes SM80 16x8x16, edit stuff if you want different stuff.");
-  // simple grid covering in (N x M) tiles
-  mlp_kernel<TM, TN, TK>
-      <<<grid, block, 0, stream>>>(B, In, Hdim, Out, X, ldX, W0, ldW0, W1, ldW1, Yb, ldYb, T, ldT,
-                                   H, ldH, Y, ldY, dY, ldDY, dH, ldDH, dW0, lddW0, dW1, lddW1, lr);
+void launch_mlp_kernel(dim3 grid, dim3 block, int B, int In, int Hdim, int Out, __nv_bfloat16* X,
+                       int ldX, __nv_bfloat16* W0, int ldW0, __nv_bfloat16* W1, int ldW1, float* H,
+                       int ldH, __nv_bfloat16* H_bf16, int ldH_bf16, float* Y, int ldY,
+                       cudaStream_t stream = nullptr) {
+  static_assert(TM == 16 && TN == 8 && TK == 16, "Hard-coded for SM80 16x8x16 BF16 MMA");
+
+  mlp_kernel<TM, TN, TK><<<grid, block, 0, stream>>>(B, In, Hdim, Out, X, ldX, W0, ldW0, W1, ldW1,
+                                                     H, ldH, H_bf16, ldH_bf16, Y, ldY);
 }
 
+// -------------------------------------------
+// MAIN
+// -------------------------------------------
 #include <cstdio>
 #include <cstdlib>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
 
 static void cuda_check(cudaError_t err, const char* msg) {
   if (err != cudaSuccess) {
@@ -230,119 +224,81 @@ static void cuda_check(cudaError_t err, const char* msg) {
 }
 
 int main() {
-  // Must be multiples of tile (16x8x16)
-  const int B   = 32;   // batch
-  const int In  = 128;  // input dim
-  const int Hdim= 256;  // hidden dim
-  const int Out = 64;   // output dim
+  const int B = 32;
+  const int In = 128;
+  const int Hdim = 256;
+  const int Out = 64;
 
-  // Tile sizes fixed by MMA_Atom (SM80_16x8x16 BF16)
   constexpr int TM = 16;
   constexpr int TN = 8;
   constexpr int TK = 16;
 
-  // row-major...
-  const int ldX  = In;
-  const int ldW0 = In;     // W0[Hdim,In]
-  const int ldW1 = Hdim;   // W1[Out,Hdim]
-  const int ldYb = Out;
-  const int ldT  = Out;
-  const int ldH  = Hdim;
-  const int ldY  = Out;
-  const int ldDY = Out;
-  const int ldDH = Hdim;
-  const int lddW0= In;
-  const int lddW1= Hdim;
+  const int ldX = In;
+  const int ldW0 = In;
+  const int ldW1 = Hdim;
+  const int ldH = Hdim;
+  const int ldH_bf16 = Hdim;
+  const int ldY = Out;
 
-  const float lr = 1e-2f;
+  size_t size_X = B * In;
+  size_t size_W0 = Hdim * In;
+  size_t size_W1 = Out * Hdim;
+  size_t size_H = B * Hdim;
+  size_t size_Y = B * Out;
 
-  // Host allocs
-  size_t size_X   = B * In;
-  size_t size_W0  = Hdim * In;
-  size_t size_W1  = Out * Hdim;
-  size_t size_Yb  = B * Out;
-  size_t size_T   = B * Out;
-  size_t size_H   = B * Hdim;
-  size_t size_Y   = B * Out;
-  size_t size_dY  = B * Out;
-  size_t size_dH  = B * Hdim;
-  size_t size_dW0 = Hdim * In;
-  size_t size_dW1 = Out * Hdim;
+  __nv_bfloat16* hX = new __nv_bfloat16[size_X];
+  __nv_bfloat16* hW0 = new __nv_bfloat16[size_W0];
+  __nv_bfloat16* hW1 = new __nv_bfloat16[size_W1];
+  float* hY = new float[size_Y];
 
-  __nv_bfloat16* hX   = new __nv_bfloat16[size_X];
-  __nv_bfloat16* hW0  = new __nv_bfloat16[size_W0];
-  __nv_bfloat16* hW1  = new __nv_bfloat16[size_W1];
-  float*         hT   = new float[size_T];
-  __nv_bfloat16* hYb  = new __nv_bfloat16[size_Yb];
+  for (size_t i = 0; i < size_X; ++i)
+    hX[i] = __float2bfloat16(float(rand()) / RAND_MAX - 0.5f);
+  for (size_t i = 0; i < size_W0; ++i)
+    hW0[i] = __float2bfloat16(float(rand()) / RAND_MAX - 0.5f);
+  for (size_t i = 0; i < size_W1; ++i)
+    hW1[i] = __float2bfloat16(float(rand()) / RAND_MAX - 0.5f);
 
-  // Rand init
-  for (size_t i = 0; i < size_X;  ++i) hX[i]  = __float2bfloat16(float(rand())/RAND_MAX - 0.5f);
-  for (size_t i = 0; i < size_W0; ++i) hW0[i] = __float2bfloat16(float(rand())/RAND_MAX - 0.5f);
-  for (size_t i = 0; i < size_W1; ++i) hW1[i] = __float2bfloat16(float(rand())/RAND_MAX - 0.5f);
-  for (size_t i = 0; i < size_T;  ++i) hT[i]  = float(rand())/RAND_MAX - 0.5f;
+  __nv_bfloat16 *dX, *dW0, *dW1, *dH_bf16;
+  float *dH, *dY;
 
-  // Device allocs
-  __nv_bfloat16 *dX, *dW0, *dW1, *dYb;
-  float *dT, *dH, *dY, *dDY, *dDH, *dW0f, *dW1f;
+  cuda_check(cudaMalloc(&dX, size_X * sizeof(__nv_bfloat16)), "malloc dX");
+  cuda_check(cudaMalloc(&dW0, size_W0 * sizeof(__nv_bfloat16)), "malloc dW0");
+  cuda_check(cudaMalloc(&dW1, size_W1 * sizeof(__nv_bfloat16)), "malloc dW1");
+  cuda_check(cudaMalloc(&dH, size_H * sizeof(float)), "malloc dH");
+  cuda_check(cudaMalloc(&dH_bf16, size_H * sizeof(__nv_bfloat16)), "malloc dH_bf16");
+  cuda_check(cudaMalloc(&dY, size_Y * sizeof(float)), "malloc dY");
 
-  cuda_check(cudaMalloc(&dX,   size_X  * sizeof(__nv_bfloat16)), "malloc dX");
-  cuda_check(cudaMalloc(&dW0,  size_W0 * sizeof(__nv_bfloat16)), "malloc dW0");
-  cuda_check(cudaMalloc(&dW1,  size_W1 * sizeof(__nv_bfloat16)), "malloc dW1");
-  cuda_check(cudaMalloc(&dYb,  size_Yb * sizeof(__nv_bfloat16)), "malloc dYb");
+  cuda_check(cudaMemcpy(dX, hX, size_X * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice), "copy X");
+  cuda_check(cudaMemcpy(dW0, hW0, size_W0 * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
+             "copy W0");
+  cuda_check(cudaMemcpy(dW1, hW1, size_W1 * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice),
+             "copy W1");
 
-  cuda_check(cudaMalloc(&dT,   size_T  * sizeof(float)), "malloc dT");
-  cuda_check(cudaMalloc(&dH,   size_H  * sizeof(float)), "malloc dH");
-  cuda_check(cudaMalloc(&dY,   size_Y  * sizeof(float)), "malloc dY");
-  cuda_check(cudaMalloc(&dDY,  size_dY * sizeof(float)), "malloc dDY");
-  cuda_check(cudaMalloc(&dDH,  size_dH * sizeof(float)), "malloc dDH");
-  cuda_check(cudaMalloc(&dW0f, size_dW0* sizeof(float)), "malloc dW0f");
-  cuda_check(cudaMalloc(&dW1f, size_dW1* sizeof(float)), "malloc dW1f");
+  dim3 block(32);
+  int max_n = (Hdim > Out) ? Hdim : Out;
+  dim3 grid((max_n + TN - 1) / TN, (B + TM - 1) / TM);
 
-  // Memcpy initial data
-  cuda_check(cudaMemcpy(dX,  hX,  size_X  * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice), "copy X");
-  cuda_check(cudaMemcpy(dW0, hW0, size_W0 * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice), "copy W0");
-  cuda_check(cudaMemcpy(dW1, hW1, size_W1 * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice), "copy W1");
-  cuda_check(cudaMemcpy(dT,  hT,  size_T  * sizeof(float),          cudaMemcpyHostToDevice), "copy T");
-
-  // ------------------------------------------
-  // Kernel launch: tile over (batch x output)
-  // grid dims: X direction = output features / TN
-  //            Y direction = batch / TM
-  // ------------------------------------------
-  dim3 block(32);  // 1 warp
-  dim3 grid((Out + TN - 1) / TN, (B + TM - 1) / TM);
-
-  launch_mlp_kernel<
-      TM, TN, TK>(
-      grid, block,
-      B, In, Hdim, Out,
-      dX, ldX,
-      dW0, ldW0,
-      dW1, ldW1,
-      dYb, ldYb,
-      dT, ldT,
-      dH, ldH,
-      dY, ldY,
-      dDY, ldDY,
-      dDH, ldDH,
-      dW0f, lddW0,
-      dW1f, lddW1,
-      lr,
-      nullptr);
+  launch_mlp_kernel<TM, TN, TK>(grid, block, B, In, Hdim, Out, dX, ldX, dW0, ldW0, dW1, ldW1, dH,
+                                ldH, dH_bf16, ldH_bf16, dY, ldY);
 
   cuda_check(cudaDeviceSynchronize(), "kernel sync");
+  cuda_check(cudaMemcpy(hY, dY, size_Y * sizeof(float), cudaMemcpyDeviceToHost), "copy Y");
 
-  cuda_check(cudaMemcpy(hYb, dYb, size_Yb*sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost), "copy Yb");
-
-  printf("Success. Yb[0] = %f\n", __bfloat162float(hYb[0]));
-  for(int i = 0; i < size_Yb; i++) {
-    if (i%128 == 0) printf("Yb[%d] = %f\n", i, __bfloat162float(hYb[0]));
+  printf("Success! Y[0] = %f\n", hY[0]);
+  for (int i = 0; i < 10 && i < size_Y; i++) {
+    printf("Y[%d] = %f\n", i, hY[i]);
   }
 
-  delete[] hX; delete[] hW0; delete[] hW1; delete[] hT; delete[] hYb;
-  cudaFree(dX); cudaFree(dW0); cudaFree(dW1); cudaFree(dYb);
-  cudaFree(dT); cudaFree(dH); cudaFree(dY); cudaFree(dDY);
-  cudaFree(dDH); cudaFree(dW0f); cudaFree(dW1f);
+  delete[] hX;
+  delete[] hW0;
+  delete[] hW1;
+  delete[] hY;
+  cudaFree(dX);
+  cudaFree(dW0);
+  cudaFree(dW1);
+  cudaFree(dH);
+  cudaFree(dH_bf16);
+  cudaFree(dY);
 
   return 0;
 }
