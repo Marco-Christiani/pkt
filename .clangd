@@ -1,8 +1,8 @@
 CompileFlags:
   CompilationDatabase: build
   Add:
-    - -I/nix/store/9ds850ifd4jwcccpp3v14818kk74ldf2-gcc-14.2.1.20250322/include/c++/14.2.1.20250322/
-    - -I/nix/store/9ds850ifd4jwcccpp3v14818kk74ldf2-gcc-14.2.1.20250322/include/c++/14.2.1.20250322//x86_64-unknown-linux-gnu
+    - -I/nix/store/ffrg0560kj0066s4k9pznjand907nlnz-gcc-14.3.0/include/c++/14.3.0/
+    - -I/nix/store/ffrg0560kj0066s4k9pznjand907nlnz-gcc-14.3.0/include/c++/14.3.0//x86_64-unknown-linux-gnu
     - -I/usr/local/cuda/include
   Remove:
     - -forward-unknown-to-host-compiler
@@ -15,7 +15,7 @@ If:
   PathMatch: [.*\.cu, .*\.cuh]
 CompileFlags:
   Add:
-    - --cuda-gpu-arch=sm_89
+    - --cuda-gpu-arch=sm_86
     - -xcuda
     - --no-cuda-version-check
 

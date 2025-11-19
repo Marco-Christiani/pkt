@@ -80,21 +80,17 @@
           ];
 
           CPATH = pkgs.lib.makeSearchPath "include" [
-              cudaPackages.cutlass
-            ];
+            cudaPackages.cutlass
+          ];
+
+          NIX_ENFORCE_NO_NATIVE = "0";
+          CUDACXX = "${cudaPackages.cudatoolkit}/bin/nvcc";
 
           shellHook = ''
-                        # for cmake/nvcc detection
-                        export CUDACXX="${cudaPackages.cudatoolkit}/bin/nvcc"
-
-                        python - <<EOF
-            import torch
-            print('Torch CUDA available:', torch.cuda.is_available())
-            EOF
-
-                        echo 'CUDA toolkit version: ${cudaPackages.cudatoolkit.version}'
-                        echo 'CUTLASS: ${cudaPackages.cutlass.version}'
-                        echo 'CUTLASS: ${cudaPackages.cutlass}'
+            python -c "import torch; print('Torch CUDA available:', torch.cuda.is_available())"
+            echo "CUDA toolkit version: ${cudaPackages.cudatoolkit.version}"
+            echo "CUTLASS: ${cudaPackages.cutlass.version}"
+            echo "CUTLASS: ${cudaPackages.cutlass}"
           '';
         };
       }

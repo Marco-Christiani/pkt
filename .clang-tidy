@@ -30,20 +30,20 @@ CheckOptions:
     value: CamelCase
   - key: readability-identifier-naming.FunctionCase
     value: lower_case
-  - key: readability-identifier-naming.VariableCase
-    value: lower_case
+  # - key: readability-identifier-naming.VariableCase
+  #   value: lower_case
   - key: readability-identifier-naming.ConstexprVariableCase
     value: UPPER_CASE
   - key: readability-identifier-naming.ParameterCase
     value: lower_case
   - key: readability-identifier-naming.EnumConstantCase
     value: UPPER_CASE
-  # Allow GPU/ML naming conventions: matrix dims (M, N, K), tensors (X, Y, W),
+  # Allow GPU/ML naming conventions: matrix dims (M, N, K), tensors (A, B, C, X, Y, W),
   # shared memory prefix (s_*), gradients (d*), targets (*_target), constants (TILE_*)
   - key: readability-identifier-naming.VariableIgnoredRegexp
-    value: '^[MNKXYWHW][0-9]?$|^s_[A-Za-z0-9]+$|^d[A-Z][A-Za-z0-9]*$|^.*_target$|^.*_out$|^TILE_[A-Z]+$'
+    value: '^[ABCMNKXYWHW][0-9]?$|^s_[A-Za-z0-9]+$|^d[A-Z][A-Za-z0-9]*$|^.*_target$|^.*_out$|^TILE_[A-Z]+$'
   - key: readability-identifier-naming.ParameterIgnoredRegexp
-    value: '^[MNKXYWHW][0-9]?$|^.*_target$|^.*_out$'
+    value: '^[ABCMNKXYWHW][0-9]?$|^.*_target$|^.*_out$'
   - key: modernize-loop-convert.MinConfidence
     value: reasonable
   - key: modernize-use-nullptr.NullMacros
