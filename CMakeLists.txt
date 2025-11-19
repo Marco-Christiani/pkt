@@ -38,12 +38,22 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nanobench)
 
 # -------------------------------------------------------------
+# Lib
+# -------------------------------------------------------------
+add_library(pk INTERFACE)
+target_include_directories(pk INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# -------------------------------------------------------------
 # Exe tgts
 # -------------------------------------------------------------
-file(GLOB FILES src/*.cu)
+file(GLOB FILES examples/*.cu)
 foreach(FILE_PATH ${FILES})
   string(REGEX REPLACE ".+/(.+)\\..*" "\\1" FILE_NAME ${FILE_PATH})
   message("Building: ${FILE_PATH}")
   add_executable(${FILE_NAME} ${FILE_PATH})
-  target_link_libraries(${FILE_NAME} PRIVATE nanobench)
+  # target_link_libraries(${FILE_NAME} PRIVATE nanobench)
+  # target_link_libraries(vadd PRIVATE CUDA::cublas CUDA::cudart)
+  # target_link_libraries(${FILE_NAME} PRIVATE cuda cudart)
+  target_link_libraries(${FILE_NAME} PRIVATE pk cuda cudart)
 endforeach()
+
