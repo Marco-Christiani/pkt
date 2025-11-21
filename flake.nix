@@ -48,15 +48,6 @@
         };
 
         cudaPackages = pkgs.cudaPackages;
-
-        pythonEnv = pkgs.python311.withPackages (
-          ps: with ps; [
-            numpy
-            pip
-            torch-bin
-          ]
-        );
-
       in
       {
         devShells.default = pkgs.mkShell {
@@ -66,10 +57,8 @@
             git
             pkg-config
             cudaPackages.cudatoolkit
-            pythonEnv
             gcc
             ninja
-            meson
 
             cudaPackages.cuda_cudart # includes libcudart_static.a
             cudaPackages.cutlass
@@ -87,7 +76,6 @@
           CUDACXX = "${cudaPackages.cudatoolkit}/bin/nvcc";
 
           shellHook = ''
-            python -c "import torch; print('Torch CUDA available:', torch.cuda.is_available())"
             echo "CUDA toolkit version: ${cudaPackages.cudatoolkit.version}"
             echo "CUTLASS: ${cudaPackages.cutlass.version}"
             echo "CUTLASS: ${cudaPackages.cutlass}"
