@@ -10,12 +10,14 @@ Checks: >
   -readability-function-cognitive-complexity,
   -readability-magic-numbers,
   -readability-isolate-declaration,
+  -readability-math-missing-parentheses,
   -bugprone-easily-swappable-parameters,
-  -bugprone-reserved-identifier,
+  # -bugprone-reserved-identifier,
   -readability-implicit-bool-conversion,
   -readability-uppercase-literal-suffix,
   -bugprone-narrowing-conversions,
-  -bugprone-exception-escape
+  -bugprone-exception-escape,
+  -modernize-use-auto
 
 WarningsAsErrors: ''
 
@@ -32,8 +34,8 @@ CheckOptions:
     value: lower_case
   # - key: readability-identifier-naming.VariableCase
   #   value: lower_case
-  - key: readability-identifier-naming.ConstexprVariableCase
-    value: UPPER_CASE
+  # - key: readability-identifier-naming.ConstexprVariableCase
+  #   value: UPPER_CASE
   - key: readability-identifier-naming.ParameterCase
     value: lower_case
   - key: readability-identifier-naming.EnumConstantCase
