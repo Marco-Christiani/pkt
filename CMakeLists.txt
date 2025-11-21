@@ -19,10 +19,8 @@ set(CMAKE_CUDA_RUNTIME_LIBRARY "Shared") # prevents -lcudadevrt /
 set(CMAKE_CUDA_ARCHITECTURES 86) # for targeting
 add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>")
 
-message(
-  DEBUG
-  "CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES: ${CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES}"
-)
+message(DEBUG "CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES: \
+        ${CMAKE_CUDA_IMPLICIT_INCLUDE_DIRECTORIES}")
 
 # ----------------------------------------------------------------------------
 # Timing
@@ -47,13 +45,25 @@ target_include_directories(pk INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 # Exe tgts
 # -------------------------------------------------------------
 file(GLOB FILES examples/*.cu)
-foreach(FILE_PATH ${FILES})
-  string(REGEX REPLACE ".+/(.+)\\..*" "\\1" FILE_NAME ${FILE_PATH})
-  message("Building: ${FILE_PATH}")
-  add_executable(${FILE_NAME} ${FILE_PATH})
+foreach(file_path ${FILES})
+  string(REGEX REPLACE ".+/(.+)\\..*" "\\1" FILE_NAME ${file_path})
+  message("Building: ${file_path}")
+  add_executable(${FILE_NAME} ${file_path})
   # target_link_libraries(${FILE_NAME} PRIVATE nanobench)
   # target_link_libraries(vadd PRIVATE CUDA::cublas CUDA::cudart)
-  # target_link_libraries(${FILE_NAME} PRIVATE cuda cudart)
   target_link_libraries(${FILE_NAME} PRIVATE pk cuda cudart)
 endforeach()
 
+# -------------------------------------------------------------
+# Tests
+# -------------------------------------------------------------
+enable_testing()
+
+file(GLOB TEST_FILES tests/*.cu)
+foreach(test_path ${TEST_FILES})
+  string(REGEX REPLACE ".+/(.+)\\..*" "\\1" TEST_NAME ${test_path})
+  message("Building test: ${test_path}")
+  add_executable(${TEST_NAME} ${test_path})
+  target_link_libraries(${TEST_NAME} PRIVATE pk cuda cudart)
+  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+endforeach()
