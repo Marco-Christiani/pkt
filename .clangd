@@ -1,24 +1,28 @@
 CompileFlags:
   CompilationDatabase: build
   Add:
-    - -I/nix/store/ffrg0560kj0066s4k9pznjand907nlnz-gcc-14.3.0/include/c++/14.3.0/
-    - -I/nix/store/ffrg0560kj0066s4k9pznjand907nlnz-gcc-14.3.0/include/c++/14.3.0//x86_64-unknown-linux-gnu
-    - -I/usr/local/cuda/include
+    - -I/nix/store/0i2b82q8w7r412xmdhj84gg74jgpym2x-gcc-13.4.0/include/c++/13.4.0
+    - -I/nix/store/0i2b82q8w7r412xmdhj84gg74jgpym2x-gcc-13.4.0/include/c++/13.4.0/x86_64-unknown-linux-gnu
+    - -I/home/marco/Github/pkt/include
+    - -I/home/marco/Github/pkt/third_party
+    - -I/nix/store/3rmkhsb7p1pryd1za3qm5px5yfbzrgw4-cuda-merged-12.8
+    - --cuda-path=/nix/store/3rmkhsb7p1pryd1za3qm5px5yfbzrgw4-cuda-merged-12.8
   Remove:
     - -forward-unknown-to-host-compiler
     - --generate-code*
+    - -Xcompiler=*
+    - --options-file
+    - --use_fast_math
+    - -rdc=true
+    - -G
 
 ---
 
-# CUDA-specific configuration for .cu and .cuh files
 If:
   PathMatch: [.*\.cu, .*\.cuh]
 CompileFlags:
   Add:
-    - --cuda-gpu-arch=sm_86
     - -xcuda
     - --no-cuda-version-check
+    - --cuda-gpu-arch=sm_86
 
-Diagnostics:
-  UnusedIncludes: None
-  MissingIncludes: None
