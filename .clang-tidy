@@ -11,6 +11,7 @@ Checks: >
   -readability-magic-numbers,
   -readability-isolate-declaration,
   -readability-math-missing-parentheses,
+  -readability-braces-around-statements,
   -bugprone-easily-swappable-parameters,
   # -bugprone-reserved-identifier,
   -readability-implicit-bool-conversion,
