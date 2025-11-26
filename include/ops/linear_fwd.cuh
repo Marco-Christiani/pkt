@@ -8,6 +8,10 @@
 
 namespace pk {
 
+// Computes y = W @ x
+// W: [m, n] row-major
+// x: [n]
+// y: [m]
 struct LinearForwardArgs {
   const float* W;
   const float* x;

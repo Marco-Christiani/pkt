@@ -7,11 +7,14 @@
 
 namespace pk {
 
+// Computes MSE loss and gradient
+// L = sum((y - target)^2) / m
+// dy = 2 * (y - target) / m
 struct MSELossArgs {
-  const float* y;
-  const float* target;
-  float* dy;
-  float* loss;
+  const float* y;      // [m]
+  const float* target; // [m]
+  float* dy;           // [m]
+  float* loss;         // [1]
   int m;
 };
 

@@ -6,8 +6,9 @@
 
 namespace pk {
 
+// Zeros a region of memory
 struct ZeroMemoryArgs {
-  float* ptr;
+  float* ptr; // [size]
   int size;
 };
 

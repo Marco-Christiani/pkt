@@ -166,10 +166,20 @@ __device__ void storer_loop(BlockRuntime& br, int lane) {
     seq++;
   }
 }
+
+// Blocks spin, processing tasks from the global queue.
+// Warps specializations: controller, loader, computer, storer
+//
+// Pipeline flow:
+//   1. Controller: dequeues tasks from global queue -> fills slots
+//   2. Loader: waits for filled slots -> loads data (Empty -> Loaded)
+//   3. Compute: waits for loaded slots -> processes (Loaded -> Computed)
+//   4. Storer: waits for computed slots -> stores results (Computed -> Empty)
 __global__ void persistent_kernel(GlobalQueue queue) {
   __shared__ PipelineSlot slots[Config::kPipelineStages];
   __shared__ int done_flag;
   __shared__ int tasks_remaining;
+  // Allocate pages for tile data staging
   __shared__ Page pages[Config::kMaxLogicalPages > 0 ? Config::kMaxLogicalPages : 1];
 
   // Set up block runtime

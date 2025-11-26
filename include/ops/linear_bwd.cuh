@@ -6,6 +6,10 @@
 
 namespace pk {
 
+// Computes weight gradient: dW = outer(dy, x) = dy @ x^T
+// dy: [m]
+// x: [n]
+// dW: [m, n] row-major (accumulated)
 struct LinearBackwardArgs {
   const float* dy;
   const float* x;

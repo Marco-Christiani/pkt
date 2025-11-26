@@ -8,9 +8,10 @@
 
 namespace pk {
 
+// SGD weight update: W -= lr * dW
 struct SGDUpdateArgs {
-  float* W;
-  const float* dW;
+  float* W;        // [size]
+  const float* dW; // [size]
   float lr;
   int size;
 };

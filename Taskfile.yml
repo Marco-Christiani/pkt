@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+vars:
+  DEV: nix develop .#default -c
+
+tasks:
+  build:
+    desc: Configure and build
+    cmds:
+      - "{{.DEV}} cmake -S . -B build -G Ninja"
+      - "{{.DEV}} cmake --build build"
+
+  test:
+    desc: Build and run test suite with ctest
+    deps:
+      - build
+    cmds:
+      - "{{.DEV}} ctest --test-dir build --output-on-failure"
+
+  clean:
+    desc: Remove the CMake build directory
+    cmds:
+      - "{{.DEV}} rm -rf build"
+
+  clangd:
+    desc: Regenerate clangd config
+    cmds:
+      - "{{.DEV}} nix run .#generate-clangd"
+
+  axpy:
+    desc: Build and run the AXPY example
+    deps:
+      - build
+    cmds:
+      - "{{.DEV}} cmake --build build --target axpy_example"
+      - "{{.DEV}} ./build/axpy_example"
+
+  train-linear:
+    desc: Build and run the linear training demo
+    deps:
+      - build
+    cmds:
+      - "{{.DEV}} cmake --build build --target train_linear"
+      - "{{.DEV}} ./build/train_linear"
