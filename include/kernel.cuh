@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdio>
+
 #include "block_runtime.cuh"
 #include "config.cuh"
 #include "dispatch.cuh"
@@ -8,9 +10,8 @@
 
 namespace pk {
 
-// Controller warp fills pipeline with tasks from global queue.
 __device__ void controller_loop(BlockRuntime& br, int lane) {
-  int slot_idx = 0;
+  int seq = 0; // global task sequence number
 
   while (true) {
     // Allocate chunk of tasks from global queue and broadcast to all lanes
@@ -21,160 +22,154 @@ __device__ void controller_loop(BlockRuntime& br, int lane) {
     chunk_begin = __shfl_sync(0xffffffff, chunk_begin, 0);
     chunk_end = __shfl_sync(0xffffffff, chunk_end, 0);
 
-    if (chunk_begin >= chunk_end) {
+    if (chunk_begin >= chunk_end)
       break;
-    }
 
     // Fill slots with tasks from this chunk
-    for (int task_idx = chunk_begin; task_idx < chunk_end; ++task_idx) {
+    for (int task_idx = chunk_begin; task_idx < chunk_end; ++task_idx, ++seq) {
+      int slot_idx = seq % br.num_slots;
       PipelineSlot& slot = br.slot(slot_idx);
+
+      // Wait for slot to be empty (storer finished with it)
       wait_for_phase(&slot.phase, SlotPhase::Empty);
 
-      if (lane == 0) { // copy into slot
+      if (lane == 0) { // transition to loading
         Task* task = get_task(&br.queue, task_idx);
-        if (task != nullptr) {
-          slot.task = *task;
-          slot.compute_warps_done = 0;
-        }
+        slot.task = *task;
+        slot.compute_warps_done = 0;
+        slot.task_seq = seq; // Tag with sequence number
+        __threadfence_block();
+        slot.phase = SlotPhase::Loading;
       }
       __syncwarp();
-
-      if (lane == 0) { // transition to loading
-        phase_transition_release(&slot.phase, SlotPhase::Loading);
-      }
-
-      slot_idx = br.next_slot(slot_idx);
     }
   }
 
   if (lane == 0) { // signal done to other warps
-    fence_acquire();
+
+    __threadfence_block();
     *br.done = 1;
   }
 }
 
-// Loader warp loads data for tasks (TODO: prefetch to SMEM?)
 __device__ void loader_loop(BlockRuntime& br, int lane) {
-  int slot_idx = 0;
+  int seq = 0; // Loader tracks which sequence it's waiting for
 
   while (true) {
+    int slot_idx = seq % br.num_slots;
     PipelineSlot& slot = br.slot(slot_idx);
 
-    // Wait for Loading phase
-    SlotPhase phase = phase_load_acquire(&slot.phase);
-    if (phase != SlotPhase::Loading) {
-      if (phase == SlotPhase::Empty) {
-        // Check termination flag
-        if (*br.done) {
-          return;
-        }
-        __nanosleep(100);
-        continue;
-      }
-      slot_idx = br.next_slot(slot_idx);
-      continue;
+    // Spin until this slot has our sequence AND is in Loading phase
+    while (true) {
+      int current_seq = slot.task_seq;
+      SlotPhase phase = slot.phase;
+
+      if (*br.done && current_seq < seq)
+        return; // No more work coming
+
+      if (current_seq == seq && phase == SlotPhase::Loading)
+        break;
+
+      __nanosleep(50);
     }
 
     dispatch_load(slot.task, br, slot_idx, lane);
     __syncwarp();
 
-    if (lane == 0) {  // Transition to Loaded
-      phase_transition_release(&slot.phase, SlotPhase::Loaded);
+    if (lane == 0) {
+      __threadfence_block();
+      slot.phase = SlotPhase::Loaded;
     }
 
-    slot_idx = br.next_slot(slot_idx);
+    seq++;
   }
 }
 
-// Compute warps: process tasks in parallel
 __device__ void compute_loop(BlockRuntime& br, int lane, int compute_warp_idx,
                              int num_compute_warps) {
-  int slot_idx = 0;
+  int seq = 0;
 
   while (true) {
+    int slot_idx = seq % br.num_slots;
     PipelineSlot& slot = br.slot(slot_idx);
 
-    while (true) { // wait for Loaded or Computing
-      SlotPhase phase = phase_load_acquire(&slot.phase);
-      if (phase == SlotPhase::Loaded || phase == SlotPhase::Computing) {
-        break;
-      }
-      if (phase == SlotPhase::Empty && *br.done) {
+    // Wait for our sequence to be Loaded or Computing
+    while (true) {
+      int current_seq = slot.task_seq;
+      SlotPhase phase = slot.phase;
+
+      if (*br.done && current_seq < seq)
         return;
-      }
-      __nanosleep(100);
+
+      if (current_seq == seq && (phase == SlotPhase::Loaded || phase == SlotPhase::Computing))
+        break;
+
+      __nanosleep(50);
     }
 
-    if (compute_warp_idx == 0 && lane == 0) { // first warp transitions to Computing
-      if (slot.phase == SlotPhase::Loaded) {  // transition if still Loaded, avoid double transition
-        phase_transition_release(&slot.phase, SlotPhase::Computing);
+    // First compute warp transitions Loaded -> Computing
+    if (compute_warp_idx == 0 && lane == 0) {
+      SlotPhase expected = SlotPhase::Loaded;
+      if (slot.phase == expected) {
+        slot.phase = SlotPhase::Computing;
+        __threadfence_block();
       }
     }
+    __syncwarp();
 
     dispatch_compute(slot.task, br, slot_idx, lane, compute_warp_idx, num_compute_warps);
     __syncwarp();
 
-    if (lane == 0) { // done++
-      int done = atomicAdd(const_cast<int*>(&slot.compute_warps_done), 1);
-
-      if (done + 1 == num_compute_warps) { // last warp transition to Computed
-        phase_transition_release(&slot.phase, SlotPhase::Computed);
+    // Last compute warp transitions Computing -> Computed
+    if (lane == 0) {
+      int done = atomicAdd((int*)&slot.compute_warps_done, 1);
+      if (done + 1 == num_compute_warps) {
+        __threadfence_block();
+        slot.phase = SlotPhase::Computed;
       }
     }
 
-    slot_idx = br.next_slot(slot_idx);
+    seq++;
   }
 }
 
-// Storer warp writes results back to GBM
 __device__ void storer_loop(BlockRuntime& br, int lane) {
-  int slot_idx = 0;
+  int seq = 0;
 
   while (true) {
+    int slot_idx = seq % br.num_slots;
     PipelineSlot& slot = br.slot(slot_idx);
 
-    SlotPhase phase = phase_load_acquire(&slot.phase);
-    if (phase != SlotPhase::Computed) { // wait for Computed
-      if (phase == SlotPhase::Empty) {
-        if (*br.done) {
-          return;
-        }
-        __nanosleep(100);
-        continue;
-      }
-      slot_idx = br.next_slot(slot_idx);
-      continue;
-    }
+    // Wait for our sequence to be Computed
+    while (true) {
+      int current_seq = slot.task_seq;
+      SlotPhase phase = slot.phase;
 
-    if (lane == 0) { // lane 0 transition to Storing
-      phase_transition_release(&slot.phase, SlotPhase::Storing);
+      if (*br.done && current_seq < seq)
+        return;
+
+      if (current_seq == seq && phase == SlotPhase::Computed)
+        break;
+
+      __nanosleep(50);
     }
 
     dispatch_store(slot.task, br, slot_idx, lane);
     __syncwarp();
 
-    if (lane == 0) { // Mark slot as empty for reuse
-      phase_transition_release(&slot.phase, SlotPhase::Empty);
+    if (lane == 0) {
+      slot.task_seq = -1; // Clear sequence
+      __threadfence_block();
+      slot.phase = SlotPhase::Empty;
     }
 
-    slot_idx = br.next_slot(slot_idx);
+    seq++;
   }
 }
-
-// Blocks spin, processing tasks from the global queue.
-// Warps specializations: controller, loader, computer, storer
-//
-// Pipeline flow:
-//   1. Controller: dequeues tasks from global queue -> fills slots
-//   2. Loader: waits for filled slots -> loads data (Empty -> Loaded)
-//   3. Compute: waits for loaded slots -> processes (Loaded -> Computed)
-//   4. Storer: waits for computed slots -> stores results (Computed -> Empty)
 __global__ void persistent_kernel(GlobalQueue queue) {
   __shared__ PipelineSlot slots[Config::kPipelineStages];
   __shared__ int done_flag;
   __shared__ int tasks_remaining;
-
-  // Allocate pages for tile data staging (use size 1 when disabled to avoid zero-sized array)
   __shared__ Page pages[Config::kMaxLogicalPages > 0 ? Config::kMaxLogicalPages : 1];
 
   // Set up block runtime
@@ -211,4 +206,4 @@ __global__ void persistent_kernel(GlobalQueue queue) {
   }
 }
 
-} // namespace mk
+} // namespace pk

@@ -10,15 +10,19 @@ namespace pk {
 
 enum class OpCode : std::uint16_t {
   Invalid = 0,
-  Axpy = 1,
-  Gemm = 2,
-  // TODO
+  ZeroMemory = 1,
+  Axpy = 2,
+  Gemm = 3,
+  LinearForward = 10,
+  MSELoss = 11,
+  LinearBackward = 12,
+  SGDUpdate = 13,
 };
 
 struct TaskHeader {
-  OpCode opcode{OpCode::Invalid};       // 2 bytes, offset 0
-  std::uint16_t arg_bytes{0};           // 2 bytes, offset 2
-  std::uint32_t user_tag{0};            // 4 bytes, offset 4 (aligned)
+  OpCode opcode{OpCode::Invalid}; // 2 bytes, offset 0
+  std::uint16_t arg_bytes{0};     // 2 bytes, offset 2
+  std::uint32_t user_tag{0};      // 4 bytes, offset 4 (aligned)
   // Total: 8 bytes, so args[] starts at 8-byte boundary
 };
 
@@ -47,4 +51,4 @@ template <typename Args> inline void encode_args(Task& t, OpCode opcode, const A
   std::memcpy(t.args, &args, sizeof(Args)); // copy args into payload
 }
 
-} // namespace mk
+} // namespace pk

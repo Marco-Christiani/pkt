@@ -27,7 +27,7 @@ bool test_task_header_layout() {
   header.opcode = OpCode::Axpy;
   header.arg_bytes = 24;
   header.user_tag = 0x12345678;
-  TEST_ASSERT_EQ(static_cast<int>(header.opcode), 1, "Axpy opcode should be 1");
+  TEST_ASSERT_EQ(static_cast<int>(header.opcode), 2, "Axpy opcode should be 2");
   TEST_ASSERT_EQ(header.arg_bytes, 24, "arg_bytes mismatch");
   TEST_ASSERT_EQ(header.user_tag, 0x12345678u, "user_tag mismatch");
   return true;
@@ -128,8 +128,9 @@ bool test_multiple_encodes() {
 
 bool test_opcode_values() {
   TEST_ASSERT_EQ(static_cast<int>(OpCode::Invalid), 0, "Invalid opcode should be 0");
-  TEST_ASSERT_EQ(static_cast<int>(OpCode::Axpy), 1, "Axpy opcode should be 1");
-  TEST_ASSERT_EQ(static_cast<int>(OpCode::Gemm), 2, "Gemm opcode should be 2");
+  TEST_ASSERT_EQ(static_cast<int>(OpCode::ZeroMemory), 1, "ZeroMemory opcode should be 1");
+  TEST_ASSERT_EQ(static_cast<int>(OpCode::Axpy), 2, "Axpy opcode should be 2");
+  TEST_ASSERT_EQ(static_cast<int>(OpCode::Gemm), 3, "Gemm opcode should be 3");
   return true;
 }
 

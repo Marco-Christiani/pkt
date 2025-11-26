@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 
 #include "config.cuh"
 #include "task.cuh"
@@ -23,6 +24,7 @@ enum class SlotPhase : int {
 struct alignas(128) PipelineSlot {
   Task task;
   volatile SlotPhase phase;
+  volatile int task_seq;
   volatile int compute_warps_done;
 
   // TODO: paging support
@@ -32,6 +34,7 @@ struct alignas(128) PipelineSlot {
 
   __device__ inline void reset() {
     phase = SlotPhase::Empty;
+    task_seq = -1;
     compute_warps_done = 0;
   }
 };
@@ -46,14 +49,15 @@ __device__ inline void fence_acquire() {
 
 // Phase transition with release semantics (writer)
 __device__ inline void phase_transition_release(volatile SlotPhase* phase, SlotPhase new_phase) {
-  *phase = new_phase;
-  fence_release();
+  __threadfence_block(); // release fence: publish earlier writes
+  *phase = new_phase;    // visible after the release
 }
 
 // Phase read with acquire semantics (reader)
 __device__ inline SlotPhase phase_load_acquire(volatile SlotPhase* phase) {
-  fence_acquire();
-  return *phase;
+  SlotPhase p = *phase;  // read phase first
+  __threadfence_block(); // acquire fence: subsequent loads observe published writes
+  return p;
 }
 
 // Adaptive spin-wait on phase transition - exponential
@@ -65,8 +69,18 @@ template <typename Pred> __device__ inline void spin_adaptive(Pred predicate) {
   }
 }
 
+// __device__ inline void wait_for_phase(volatile SlotPhase* phase, SlotPhase target) {
+//   spin_adaptive([&]() { return phase_load_acquire(phase) == target; });
+// }
 __device__ inline void wait_for_phase(volatile SlotPhase* phase, SlotPhase target) {
-  spin_adaptive([&]() { return phase_load_acquire(phase) == target; });
+  int spins = 0;
+  spin_adaptive([&]() {
+    spins++;
+    if (spins % 10000 == 0) {
+      printf("wait_for_phase: spins=%d, phase=%d, target=%d\n", spins, (int)*phase, (int)target);
+    }
+    return phase_load_acquire(phase) == target;
+  });
 }
 
 // Ring buffer index advance
@@ -79,4 +93,4 @@ __device__ inline int ring_advance(int index) {
   }
 }
 
-} // namespace mk
+} // namespace pk
