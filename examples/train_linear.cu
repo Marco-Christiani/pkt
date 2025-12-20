@@ -141,13 +141,14 @@ int main() {
   constexpr uint16_t kBufY = 1;           // Forward output ready
   constexpr uint16_t kBufGradReady = 2;   // Loss + zero-dW prerequisites
   constexpr uint16_t kBufDW = 3;          // dW ready for SGD
+  constexpr uint16_t kBufW = 4;           // Weight updates ready
 
   std::cout << "Megakernel Training Demo\n";
   std::cout << "========================\n";
   std::cout << "Model: y = Wx, W:[" << m << "," << n << "]\n";
   std::cout << "Steps: " << num_steps << ", LR: " << lr << "\n";
   std::cout << "Tasks per step: " << tasks_per_step << "\n";
-  std::cout << "Kernel launches: " << num_steps << "\n\n";
+  std::cout << "Kernel launches: 1\n\n";
 
   std::mt19937 rng(42);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -204,108 +205,93 @@ int main() {
   // dW and loss will be zeroed in the training loop
   check_cuda("memcpy H2D");
 
-  // Initialize runtime with capacity for a single step worth of tasks
+  // Initialize runtime with capacity for all steps worth of tasks
   pk::Runtime runtime;
-  runtime.initialize(tasks_per_step);
+  runtime.initialize(num_steps * tasks_per_step);
   const int num_blocks = pk::Runtime::get_num_sms();
 
   // === SINGLE KERNEL LAUNCH ===
-  std::cout << "Launching megakernel with " << num_steps << " launches ("
-            << tasks_per_step << " tasks per step, " << num_blocks << " blocks per launch)...\n";
+  std::cout << "Launching megakernel with 1 launch (" << tasks_per_step << " tasks per step, "
+            << num_blocks << " blocks)...\n";
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  cudaEventRecord(start);
+  std::vector<pk::Task> tasks;
+  tasks.reserve(num_steps * tasks_per_step);
+
+  // Track cumulative ready counts per buffer to set wait thresholds
+  int ready_y = 0;
+  int ready_grad = 0;
+  int ready_dw = 0;
+  int ready_w = 0;
+
   for (int step = 0; step < num_steps; ++step) {
-    // Debug first step
-    if (step == 0) {
-      float h_y_debug[5], h_dy_debug[5], h_dW_debug[5];
-      cudaMemcpy(h_y_debug, d_y, 5 * sizeof(float), cudaMemcpyDeviceToHost);
-      std::cout << "Step 0 - Before: y[0:5] = ";
-      for (int i = 0; i < 5; i++)
-        std::cout << h_y_debug[i] << " ";
-      std::cout << "\n";
-    }
-
-    std::vector<pk::Task> tasks(tasks_per_step);
-
     // Task 0: Zero loss
+    pk::Task zero_loss_task{};
     pk::ZeroMemoryArgs zero_loss{.ptr = d_loss, .size = 1};
-    pk::encode_args(tasks[0], pk::OpCode::ZeroMemory, zero_loss);
-    tasks[0].header.buffer_read_id = 0;
-    tasks[0].header.buffer_write_id = 0;
-    tasks[0].header.wait_count = 0;
+    pk::encode_args(zero_loss_task, pk::OpCode::ZeroMemory, zero_loss);
+    zero_loss_task.header.buffer_read_id = 0;
+    zero_loss_task.header.buffer_write_id = 0;
+    zero_loss_task.header.wait_count = 0;
+    tasks.push_back(zero_loss_task);
 
-    // Task 1: Forward
+    // Task 1: Forward (reads W generation)
+    pk::Task fwd_task{};
     pk::LinearForwardArgs fwd_args{.W = d_W, .x = d_x, .y = d_y, .m = m, .n = n};
-    pk::encode_args(tasks[1], pk::OpCode::LinearForward, fwd_args);
-    tasks[1].header.buffer_read_id = 0;
-    tasks[1].header.buffer_write_id = kBufY;
-    tasks[1].header.wait_count = 0;
+    pk::encode_args(fwd_task, pk::OpCode::LinearForward, fwd_args);
+    fwd_task.header.buffer_read_id = kBufW;
+    fwd_task.header.buffer_write_id = kBufY;
+    fwd_task.header.wait_count = ready_w; // ensure latest W update applied
+    tasks.push_back(fwd_task);
+    ready_y += 1;
 
-    // Task 2: Loss + dy
+    // Task 2: Loss + dy (depends on forward output)
+    pk::Task loss_task{};
     pk::MSELossArgs loss_args{.y = d_y, .target = d_target, .dy = d_dy, .loss = d_loss, .m = m};
-    pk::encode_args(tasks[2], pk::OpCode::MSELoss, loss_args);
-    tasks[2].header.buffer_read_id = kBufY;      // Wait for forward output
-    tasks[2].header.buffer_write_id = kBufGradReady; // Signal gradient prerequisites
-    tasks[2].header.wait_count = 1;
+    pk::encode_args(loss_task, pk::OpCode::MSELoss, loss_args);
+    loss_task.header.buffer_read_id = kBufY;
+    loss_task.header.buffer_write_id = kBufGradReady; // part 1 of grad readiness
+    loss_task.header.wait_count = ready_y;
+    tasks.push_back(loss_task);
+    ready_grad += 1;
 
-    // Task 3: Zero dW (must happen BEFORE backward accumulates into it)
+    // Task 3: Zero dW (prereq for backward accumulation)
+    pk::Task zero_dW_task{};
     pk::ZeroMemoryArgs zero_dW{.ptr = d_dW, .size = m * n};
-    pk::encode_args(tasks[3], pk::OpCode::ZeroMemory, zero_dW);
-    tasks[3].header.buffer_read_id = 0;
-    tasks[3].header.buffer_write_id = kBufGradReady; // Pair with loss for backward readiness
-    tasks[3].header.wait_count = 0;
+    pk::encode_args(zero_dW_task, pk::OpCode::ZeroMemory, zero_dW);
+    zero_dW_task.header.buffer_read_id = 0;
+    zero_dW_task.header.buffer_write_id = kBufGradReady; // part 2 of grad readiness
+    zero_dW_task.header.wait_count = 0;
+    tasks.push_back(zero_dW_task);
+    ready_grad += 1;
 
-    // Task 4: Backward (dW += outer(dy, x))
+    // Task 4: Backward (dW += outer(dy, x)) depends on grad readiness
+    pk::Task bwd_task{};
     pk::LinearBackwardArgs bwd_args{.dy = d_dy, .x = d_x, .dW = d_dW, .m = m, .n = n};
-    pk::encode_args(tasks[4], pk::OpCode::LinearBackward, bwd_args);
-    tasks[4].header.buffer_read_id = kBufGradReady; // Wait for loss + zero_dW
-    tasks[4].header.buffer_write_id = kBufDW;
-    tasks[4].header.wait_count = 2;
+    pk::encode_args(bwd_task, pk::OpCode::LinearBackward, bwd_args);
+    bwd_task.header.buffer_read_id = kBufGradReady;
+    bwd_task.header.buffer_write_id = kBufDW;
+    bwd_task.header.wait_count = ready_grad; // loss + zero_dW complete
+    tasks.push_back(bwd_task);
+    ready_dw += 1;
 
-    // Task 5: SGD update (W -= lr * dW)
+    // Task 5: SGD update (W -= lr * dW) depends on dW for this step
+    pk::Task sgd_task{};
     pk::SGDUpdateArgs sgd_args{.W = d_W, .dW = d_dW, .lr = lr, .size = m * n};
-    pk::encode_args(tasks[5], pk::OpCode::SGDUpdate, sgd_args);
-    tasks[5].header.buffer_read_id = kBufDW; // Wait for backward
-    tasks[5].header.buffer_write_id = 0;
-    tasks[5].header.wait_count = 1;
-
-    runtime.submit_tasks(tasks);
-    runtime.launch(num_blocks);
-    runtime.synchronize(); // enforce step ordering
-
-    // Debug first and last steps
-    if (step == 0 || step == num_steps - 1) {
-      float h_loss_debug;
-      float h_y_debug[5], h_dy_debug[5], h_dW_debug[5], h_W_debug[5];
-      cudaMemcpy(&h_loss_debug, d_loss, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(h_y_debug, d_y, 5 * sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(h_dy_debug, d_dy, 5 * sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(h_dW_debug, d_dW, 5 * sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(h_W_debug, d_W, 5 * sizeof(float), cudaMemcpyDeviceToHost);
-      std::cout << "Step " << step << " - After:\n";
-      std::cout << "  loss = " << h_loss_debug << "\n";
-      std::cout << "  y[0:5] = ";
-      for (int i = 0; i < 5; i++)
-        std::cout << h_y_debug[i] << " ";
-      std::cout << "\n";
-      std::cout << "  W[0:5] = ";
-      for (int i = 0; i < 5; i++)
-        std::cout << h_W_debug[i] << " ";
-      std::cout << "\n";
-      std::cout << "  dy[0:5] = ";
-      for (int i = 0; i < 5; i++)
-        std::cout << h_dy_debug[i] << " ";
-      std::cout << "\n";
-      std::cout << "  dW[0:5] = ";
-      for (int i = 0; i < 5; i++)
-        std::cout << h_dW_debug[i] << " ";
-      std::cout << "\n";
-    }
+    pk::encode_args(sgd_task, pk::OpCode::SGDUpdate, sgd_args);
+    sgd_task.header.buffer_read_id = kBufDW;
+    sgd_task.header.buffer_write_id = kBufW;
+    sgd_task.header.wait_count = ready_dw;
+    tasks.push_back(sgd_task);
+    ready_w += 1;
   }
+
+  cudaEventRecord(start);
+  runtime.submit_tasks(tasks);
+  runtime.launch(num_blocks);
+  runtime.synchronize();
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
 
