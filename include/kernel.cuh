@@ -4,6 +4,7 @@
 
 #include "block_runtime.cuh"
 #include "config.cuh"
+#include "dependency.cuh"
 #include "dispatch.cuh"
 #include "pipeline.cuh"
 #include "queue.cuh"
@@ -33,8 +34,17 @@ __device__ void controller_loop(BlockRuntime& br, int lane) {
       // Wait for slot to be empty (storer finished with it)
       wait_for_phase(&slot.phase, SlotPhase::Empty);
 
+      Task* task = get_task(&br.queue, task_idx);
+
+      // Wait for declared dependencies to be satisfied
+      if (lane == 0 && br.deps) {
+        while (!br.deps->is_ready(*task)) {
+          __nanosleep(100);
+        }
+      }
+      __syncwarp();
+
       if (lane == 0) { // transition to loading
-        Task* task = get_task(&br.queue, task_idx);
         slot.task = *task;
         slot.compute_warps_done = 0;
         slot.task_seq = seq; // Tag with sequence number
@@ -158,6 +168,12 @@ __device__ void storer_loop(BlockRuntime& br, int lane) {
     __syncwarp();
 
     if (lane == 0) {
+      // Publish data before marking dependency as ready
+      __threadfence();
+      if (br.deps) {
+        br.deps->mark_ready(slot.task.header.buffer_write_id);
+      }
+
       slot.task_seq = -1; // Clear sequence
       __threadfence_block();
       slot.phase = SlotPhase::Empty;
@@ -175,7 +191,7 @@ __device__ void storer_loop(BlockRuntime& br, int lane) {
 //   2. Loader: waits for filled slots -> loads data (Empty -> Loaded)
 //   3. Compute: waits for loaded slots -> processes (Loaded -> Computed)
 //   4. Storer: waits for computed slots -> stores results (Computed -> Empty)
-__global__ void persistent_kernel(GlobalQueue queue) {
+__global__ void persistent_kernel(GlobalQueue queue, DependencyState* deps) {
   __shared__ PipelineSlot slots[Config::kPipelineStages];
   __shared__ int done_flag;
   __shared__ int tasks_remaining;
@@ -190,6 +206,7 @@ __global__ void persistent_kernel(GlobalQueue queue) {
   br.done = &done_flag;
   br.pages = Config::kMaxLogicalPages > 0 ? pages : nullptr;
   br.num_pages = Config::kMaxLogicalPages;
+  br.deps = deps;
 
   const int tid = threadIdx.x;
   if (tid == 0) {

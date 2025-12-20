@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "dependency.cuh"
 #include "kernel.cuh"
 #include "queue.cuh"
 #include "task.cuh"
@@ -23,6 +24,8 @@ public:
     cudaMalloc(&d_tasks_, max_tasks * sizeof(Task));
     cudaMalloc(&d_next_index_, sizeof(int));
     cudaMemset(d_next_index_, 0, sizeof(int));
+    cudaMalloc(&d_deps_, sizeof(DependencyState));
+    reset_dependencies();
   }
 
   void submit_tasks(const std::vector<Task>& tasks) {
@@ -32,6 +35,7 @@ public:
     num_tasks_ = static_cast<int>(tasks.size());
     cudaMemcpy(d_tasks_, tasks.data(), num_tasks_ * sizeof(Task), cudaMemcpyHostToDevice);
     cudaMemset(d_next_index_, 0, sizeof(int)); // reset counter
+    reset_dependencies();                      // fresh dependency counts per submission
   }
 
   void launch(int num_blocks, cudaStream_t stream = nullptr) {
@@ -40,7 +44,7 @@ public:
     queue.total = num_tasks_;
     queue.next_index = d_next_index_;
 
-    persistent_kernel<<<num_blocks, Config::kThreadsPerBlock, 0, stream>>>(queue);
+    persistent_kernel<<<num_blocks, Config::kThreadsPerBlock, 0, stream>>>(queue, d_deps_);
   }
 
   void synchronize() { cudaDeviceSynchronize(); }
@@ -63,12 +67,23 @@ private:
       cudaFree(d_next_index_);
       d_next_index_ = nullptr;
     }
+    if (d_deps_) {
+      cudaFree(d_deps_);
+      d_deps_ = nullptr;
+    }
   }
 
   Task* d_tasks_{nullptr};
   int* d_next_index_{nullptr};
+  DependencyState* d_deps_{nullptr};
   int max_tasks_{0};
   int num_tasks_{0};
+
+  void reset_dependencies() {
+    if (d_deps_) {
+      cudaMemset(d_deps_, 0, sizeof(DependencyState));
+    }
+  }
 };
 
 } // namespace mk

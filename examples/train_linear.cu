@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -136,6 +137,11 @@ int main() {
   constexpr float lr = 0.001f;
   constexpr int tasks_per_step = 4 + 2; // +2 for zero mem
 
+  // Dependency buffer ids (tokens only, not tied to physical buffers)
+  constexpr uint16_t kBufY = 1;           // Forward output ready
+  constexpr uint16_t kBufGradReady = 2;   // Loss + zero-dW prerequisites
+  constexpr uint16_t kBufDW = 3;          // dW ready for SGD
+
   std::cout << "Megakernel Training Demo\n";
   std::cout << "========================\n";
   std::cout << "Model: y = Wx, W:[" << m << "," << n << "]\n";
@@ -201,10 +207,11 @@ int main() {
   // Initialize runtime with capacity for a single step worth of tasks
   pk::Runtime runtime;
   runtime.initialize(tasks_per_step);
+  const int num_blocks = pk::Runtime::get_num_sms();
 
   // === SINGLE KERNEL LAUNCH ===
   std::cout << "Launching megakernel with " << num_steps << " launches ("
-            << tasks_per_step << " tasks per step)...\n";
+            << tasks_per_step << " tasks per step, " << num_blocks << " blocks per launch)...\n";
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
@@ -227,29 +234,47 @@ int main() {
     // Task 0: Zero loss
     pk::ZeroMemoryArgs zero_loss{.ptr = d_loss, .size = 1};
     pk::encode_args(tasks[0], pk::OpCode::ZeroMemory, zero_loss);
+    tasks[0].header.buffer_read_id = 0;
+    tasks[0].header.buffer_write_id = 0;
+    tasks[0].header.wait_count = 0;
 
     // Task 1: Forward
     pk::LinearForwardArgs fwd_args{.W = d_W, .x = d_x, .y = d_y, .m = m, .n = n};
     pk::encode_args(tasks[1], pk::OpCode::LinearForward, fwd_args);
+    tasks[1].header.buffer_read_id = 0;
+    tasks[1].header.buffer_write_id = kBufY;
+    tasks[1].header.wait_count = 0;
 
     // Task 2: Loss + dy
     pk::MSELossArgs loss_args{.y = d_y, .target = d_target, .dy = d_dy, .loss = d_loss, .m = m};
     pk::encode_args(tasks[2], pk::OpCode::MSELoss, loss_args);
+    tasks[2].header.buffer_read_id = kBufY;      // Wait for forward output
+    tasks[2].header.buffer_write_id = kBufGradReady; // Signal gradient prerequisites
+    tasks[2].header.wait_count = 1;
 
     // Task 3: Zero dW (must happen BEFORE backward accumulates into it)
     pk::ZeroMemoryArgs zero_dW{.ptr = d_dW, .size = m * n};
     pk::encode_args(tasks[3], pk::OpCode::ZeroMemory, zero_dW);
+    tasks[3].header.buffer_read_id = 0;
+    tasks[3].header.buffer_write_id = kBufGradReady; // Pair with loss for backward readiness
+    tasks[3].header.wait_count = 0;
 
     // Task 4: Backward (dW += outer(dy, x))
     pk::LinearBackwardArgs bwd_args{.dy = d_dy, .x = d_x, .dW = d_dW, .m = m, .n = n};
     pk::encode_args(tasks[4], pk::OpCode::LinearBackward, bwd_args);
+    tasks[4].header.buffer_read_id = kBufGradReady; // Wait for loss + zero_dW
+    tasks[4].header.buffer_write_id = kBufDW;
+    tasks[4].header.wait_count = 2;
 
     // Task 5: SGD update (W -= lr * dW)
     pk::SGDUpdateArgs sgd_args{.W = d_W, .dW = d_dW, .lr = lr, .size = m * n};
     pk::encode_args(tasks[5], pk::OpCode::SGDUpdate, sgd_args);
+    tasks[5].header.buffer_read_id = kBufDW; // Wait for backward
+    tasks[5].header.buffer_write_id = 0;
+    tasks[5].header.wait_count = 1;
 
     runtime.submit_tasks(tasks);
-    runtime.launch(1); // single block processes tasks sequentially
+    runtime.launch(num_blocks);
     runtime.synchronize(); // enforce step ordering
 
     // Debug first and last steps

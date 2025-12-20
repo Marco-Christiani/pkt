@@ -70,7 +70,7 @@ template <typename Pred> __device__ inline void spin_adaptive(Pred predicate) {
 }
 
 // __device__ inline void wait_for_phase(volatile SlotPhase* phase, SlotPhase target) {
-//   spin_adaptive([&]() { return phase_load_acquire(phase) == target; });
+//   spin_adaptive([&]() { return phase_load_acquire(phase) == target; })
 // }
 __device__ inline void wait_for_phase(volatile SlotPhase* phase, SlotPhase target) {
   int spins = 0;

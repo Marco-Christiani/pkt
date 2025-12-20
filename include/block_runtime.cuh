@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.cuh"
+#include "dependency.cuh"
 #include "pipeline.cuh"
 #include "queue.cuh"
 
@@ -42,6 +43,9 @@ struct BlockRuntime {
 
   // Termination flag - set by controller when all work is done
   volatile int* done{nullptr};
+
+  // Global dependency tracking
+  DependencyState* deps{nullptr};
 
   // Debug
   int tasks_processed{0};
