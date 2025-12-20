@@ -11,7 +11,7 @@ using namespace pk::test;
 
 bool test_task_size_and_alignment() {
   TEST_ASSERT_EQ(alignof(Task), 16, "Task alignment should be 16 bytes");
-  TEST_ASSERT_EQ(sizeof(TaskHeader), 16, "TaskHeader should be 16 bytes");
+  TEST_ASSERT_EQ(sizeof(TaskHeader), 20, "TaskHeader should be 20 bytes");
 
   // total = header + args (+ padding)
   size_t expected_size = sizeof(TaskHeader) + Config::kArgBytes;

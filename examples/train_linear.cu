@@ -221,11 +221,15 @@ int main() {
   std::vector<pk::Task> tasks;
   tasks.reserve(num_steps * tasks_per_step);
 
-  // Track cumulative ready counts per buffer to set wait thresholds
+  // Track cumulative ready counts and epochs per buffer
   int ready_y = 0;
   int ready_grad = 0;
   int ready_dw = 0;
   int ready_w = 0;
+  int epoch_y = 0;
+  int epoch_grad = 0;
+  int epoch_dw = 0;
+  int epoch_w = 0;
 
   for (int step = 0; step < num_steps; ++step) {
     // Task 0: Zero loss
@@ -244,8 +248,11 @@ int main() {
     fwd_task.header.buffer_read_id = kBufW;
     fwd_task.header.buffer_write_id = kBufY;
     fwd_task.header.wait_count = ready_w; // ensure latest W update applied
+    fwd_task.header.read_epoch = epoch_w;
+    fwd_task.header.write_epoch = epoch_y + 1;
     tasks.push_back(fwd_task);
     ready_y += 1;
+    epoch_y += 1;
 
     // Task 2: Loss + dy (depends on forward output)
     pk::Task loss_task{};
@@ -254,8 +261,11 @@ int main() {
     loss_task.header.buffer_read_id = kBufY;
     loss_task.header.buffer_write_id = kBufGradReady; // part 1 of grad readiness
     loss_task.header.wait_count = ready_y;
+    loss_task.header.read_epoch = epoch_y;
+    loss_task.header.write_epoch = epoch_grad + 1;
     tasks.push_back(loss_task);
     ready_grad += 1;
+    epoch_grad += 1;
 
     // Task 3: Zero dW (prereq for backward accumulation)
     pk::Task zero_dW_task{};
@@ -264,8 +274,11 @@ int main() {
     zero_dW_task.header.buffer_read_id = 0;
     zero_dW_task.header.buffer_write_id = kBufGradReady; // part 2 of grad readiness
     zero_dW_task.header.wait_count = 0;
+    zero_dW_task.header.read_epoch = 0;
+    zero_dW_task.header.write_epoch = epoch_grad + 1;
     tasks.push_back(zero_dW_task);
     ready_grad += 1;
+    epoch_grad += 1;
 
     // Task 4: Backward (dW += outer(dy, x)) depends on grad readiness
     pk::Task bwd_task{};
@@ -274,8 +287,11 @@ int main() {
     bwd_task.header.buffer_read_id = kBufGradReady;
     bwd_task.header.buffer_write_id = kBufDW;
     bwd_task.header.wait_count = ready_grad; // loss + zero_dW complete
+    bwd_task.header.read_epoch = epoch_grad;
+    bwd_task.header.write_epoch = epoch_dw + 1;
     tasks.push_back(bwd_task);
     ready_dw += 1;
+    epoch_dw += 1;
 
     // Task 5: SGD update (W -= lr * dW) depends on dW for this step
     pk::Task sgd_task{};
@@ -284,8 +300,11 @@ int main() {
     sgd_task.header.buffer_read_id = kBufDW;
     sgd_task.header.buffer_write_id = kBufW;
     sgd_task.header.wait_count = ready_dw;
+    sgd_task.header.read_epoch = epoch_dw;
+    sgd_task.header.write_epoch = epoch_w + 1;
     tasks.push_back(sgd_task);
     ready_w += 1;
+    epoch_w += 1;
   }
 
   cudaEventRecord(start);

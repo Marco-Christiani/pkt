@@ -171,7 +171,8 @@ __device__ void storer_loop(BlockRuntime& br, int lane) {
       // Publish data before marking dependency as ready
       __threadfence();
       if (br.deps) {
-        br.deps->mark_ready(slot.task.header.buffer_write_id);
+        br.deps->mark_ready(slot.task.header.buffer_write_id,
+                            static_cast<int>(slot.task.header.write_epoch));
       }
 
       slot.task_seq = -1; // Clear sequence

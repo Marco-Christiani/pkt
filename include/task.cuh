@@ -26,9 +26,10 @@ struct TaskHeader {
   // Dependency metadata
   std::uint16_t buffer_read_id{0};
   std::uint16_t buffer_write_id{0};
-  std::uint16_t wait_count{0};
-  std::uint16_t reserved{0};
-  // Total: 16 bytes, so args[] starts at 16-byte boundary
+  std::uint32_t wait_count{0};
+  std::uint16_t read_epoch{0};
+  std::uint16_t write_epoch{0};
+  // Total: 20 bytes, so args[] starts at 20-byte boundary
 };
 
 // Task structure = header + opaque argument payload
@@ -54,7 +55,8 @@ template <typename Args> inline void encode_args(Task& t, OpCode opcode, const A
   t.header.buffer_read_id = 0;
   t.header.buffer_write_id = 0;
   t.header.wait_count = 0;
-  t.header.reserved = 0;
+  t.header.read_epoch = 0;
+  t.header.write_epoch = 0;
 
   std::memset(t.args, 0, Config::kArgBytes);
   std::memcpy(t.args, &args, sizeof(Args)); // copy args into payload

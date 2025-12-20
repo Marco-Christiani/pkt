@@ -23,9 +23,10 @@ struct DependencyState {
     }
   }
 
-  __device__ inline void mark_ready(int buffer_id) {
+  __device__ inline void mark_ready(int buffer_id, int epoch) {
     if (buffer_id != 0) {
       atomicAdd((int*)&buffer_ready_count[buffer_id], 1);
+      atomicMax((int*)&buffer_epoch[buffer_id], epoch);
     }
   }
 
@@ -40,7 +41,9 @@ struct DependencyState {
       return true; // No dependency declared
     }
     int ready = get_ready_count(task.header.buffer_read_id);
-    return ready >= task.header.wait_count;
+    int epoch = atomicAdd((int*)&buffer_epoch[task.header.buffer_read_id], 0);
+    return ready >= static_cast<int>(task.header.wait_count) &&
+           epoch >= static_cast<int>(task.header.read_epoch);
   }
 };
 
