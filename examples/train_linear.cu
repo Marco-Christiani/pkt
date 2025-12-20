@@ -26,12 +26,12 @@ void check_cuda(const char* msg) {
 
 struct TestData {
   std::vector<float> h_W;
-  std::vector<float> h_x;
-  std::vector<float> h_target;
+  std::vector<float> h_x;      // [batch, n]
+  std::vector<float> h_target; // [batch, m]
 };
 
-// m outputs, n inputs
-TestData make_linear_test_data(int m, int n) {
+// m outputs, n inputs, batch samples
+TestData make_linear_test_data(int m, int n, int batch) {
   std::mt19937 rng(42);
 
   // Xavier/Glorot variance: sqrt(2/(m+n))
@@ -41,8 +41,8 @@ TestData make_linear_test_data(int m, int n) {
   std::normal_distribution<float> noise_dist(0.0f, 0.01f);
 
   std::vector<float> h_W(m * n);
-  std::vector<float> h_x(n);
-  std::vector<float> h_target(m);
+  std::vector<float> h_x(batch * n);
+  std::vector<float> h_target(batch * m);
 
   // W ~ N(0, scale^2)
   for (auto& w : h_W)
@@ -52,13 +52,17 @@ TestData make_linear_test_data(int m, int n) {
   for (auto& x : h_x)
     x = xdist(rng);
 
-  // t = W x + noise
-  for (int i = 0; i < m; i++) {
-    float acc = 0.0f;
-    const float* Wi = &h_W[i * n];
-    for (int j = 0; j < n; j++)
-      acc += Wi[j] * h_x[j];
-    h_target[i] = acc + noise_dist(rng);
+  // t = W x + noise, per sample
+  for (int b = 0; b < batch; ++b) {
+    const float* xb = &h_x[b * n];
+    float* tb = &h_target[b * m];
+    for (int i = 0; i < m; i++) {
+      float acc = 0.0f;
+      const float* Wi = &h_W[i * n];
+      for (int j = 0; j < n; j++)
+        acc += Wi[j] * xb[j];
+      tb[i] = acc + noise_dist(rng);
+    }
   }
 
   return {.h_W = h_W, .h_x = h_x, .h_target = h_target};
@@ -82,47 +86,56 @@ struct CPUTrainResult {
 
 /*
   Trains:
-      y = W x
+      y = W x (batched)
       loss = 0.5 * ||y - target||^2
       SGD update: W -= lr * dW
-  Single-sample loop.
+  Batched loop over "batch" samples per step.
 */
-CPUTrainResult cpu_train_linear(std::vector<float> W,             // shape [m*n]
-                                const std::vector<float>& x,      // shape [n]
-                                const std::vector<float>& target, // shape [m]
-                                int m, int n, int steps, float lr) {
-  std::vector<float> y(m);
-  std::vector<float> dy(m);
+CPUTrainResult cpu_train_linear(std::vector<float> W,                  // shape [m*n]
+                                const std::vector<float>& x,           // shape [batch, n]
+                                const std::vector<float>& target,      // shape [batch, m]
+                                int batch, int m, int n, int steps, float lr) {
+  std::vector<float> y(batch * m);
+  std::vector<float> dy(batch * m);
   std::vector<float> loss_curve;
   loss_curve.reserve(steps);
 
   for (int step = 0; step < steps; ++step) {
     // ----- Forward: y = W x -----
-    for (int i = 0; i < m; ++i) {
-      float acc = 0.f;
-      const float* Wi = &W[i * n];
-      for (int j = 0; j < n; ++j)
-        acc += Wi[j] * x[j];
-      y[i] = acc;
+    for (int b = 0; b < batch; ++b) {
+      const float* xb = &x[b * n];
+      float* yb = &y[b * m];
+      for (int i = 0; i < m; ++i) {
+        float acc = 0.f;
+        const float* Wi = &W[i * n];
+        for (int j = 0; j < n; ++j)
+          acc += Wi[j] * xb[j];
+        yb[i] = acc;
+      }
     }
 
     // ----- Loss + dy = y - target -----
     float loss = 0.f;
-    for (int i = 0; i < m; ++i) {
+    const float scale = 2.0f / float(batch * m);
+    for (int i = 0; i < batch * m; ++i) {
       float diff = y[i] - target[i];
-      dy[i] = 2.0f * diff / float(m);
-      loss += diff * diff / float(m);
+      dy[i] = scale * diff;
+      loss += diff * diff;
     }
+    loss /= float(batch * m);
 
     loss_curve.push_back(loss);
 
     // ----- Backward: dW = dy ⊗ x -----
     // SGD update: W -= lr * dW
     for (int i = 0; i < m; ++i) {
-      float dyi = dy[i];
       float* Wi = &W[i * n];
       for (int j = 0; j < n; ++j) {
-        Wi[j] -= lr * (dyi * x[j]);
+        float grad = 0.f;
+        for (int b = 0; b < batch; ++b) {
+          grad += dy[b * m + i] * x[b * n + j];
+        }
+        Wi[j] -= lr * grad;
       }
     }
   }
@@ -133,6 +146,7 @@ CPUTrainResult cpu_train_linear(std::vector<float> W,             // shape [m*n]
 int main() {
   constexpr int m = 64;
   constexpr int n = 128;
+  constexpr int batch = 16;
   constexpr int num_steps = 100;
   constexpr float lr = 0.001f;
   constexpr int tasks_per_step = 4 + 2; // +2 for zero mem
@@ -154,30 +168,34 @@ int main() {
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
   // Host data
-  const auto td = make_linear_test_data(m, n);
+  const auto td = make_linear_test_data(m, n, batch);
 
   // Do a host-side forward to get baseline loss
-  std::vector<float> h_y0(m);
-  for (int i = 0; i < m; ++i) {
-    float acc = 0.f;
-    const float* Wi = &td.h_W[i * n];
-    for (int j = 0; j < n; ++j)
-      acc += Wi[j] * td.h_x[j];
-    h_y0[i] = acc;
+  std::vector<float> h_y0(batch * m);
+  for (int b = 0; b < batch; ++b) {
+    float* yb = &h_y0[b * m];
+    const float* xb = &td.h_x[b * n];
+    for (int i = 0; i < m; ++i) {
+      float acc = 0.f;
+      const float* Wi = &td.h_W[i * n];
+      for (int j = 0; j < n; ++j)
+        acc += Wi[j] * xb[j];
+      yb[i] = acc;
+    }
   }
 
   float initial_loss = host_mse(h_y0, td.h_target);
   std::cout << "Initial host loss: " << initial_loss << "\n";
 
-  auto cpu_res = cpu_train_linear(td.h_W, td.h_x, td.h_target, m, n, num_steps, lr);
+  auto cpu_res = cpu_train_linear(td.h_W, td.h_x, td.h_target, batch, m, n, num_steps, lr);
 
   std::cout << "CPU final loss: " << cpu_res.final_loss << "\n";
   std::cout << "CPU first step loss: " << cpu_res.loss_curve[0] << "\n";
-  std::cout << "x[0:5] = ";
+  std::cout << "x[0:5] (sample 0) = ";
   for (int i = 0; i < 5; i++)
     std::cout << td.h_x[i] << " ";
   std::cout << "\n";
-  std::cout << "target[0:5] = ";
+  std::cout << "target[0:5] (sample 0) = ";
   for (int i = 0; i < 5; i++)
     std::cout << td.h_target[i] << " ";
   std::cout << "\n";
@@ -191,17 +209,17 @@ int main() {
   // Device allocations
   float *d_W, *d_x, *d_y, *d_target, *d_dy, *d_dW, *d_loss;
   cudaMalloc(&d_W, m * n * sizeof(float));
-  cudaMalloc(&d_x, n * sizeof(float));
-  cudaMalloc(&d_y, m * sizeof(float));
-  cudaMalloc(&d_target, m * sizeof(float));
-  cudaMalloc(&d_dy, m * sizeof(float));
+  cudaMalloc(&d_x, batch * n * sizeof(float));
+  cudaMalloc(&d_y, batch * m * sizeof(float));
+  cudaMalloc(&d_target, batch * m * sizeof(float));
+  cudaMalloc(&d_dy, batch * m * sizeof(float));
   cudaMalloc(&d_dW, m * n * sizeof(float));
   cudaMalloc(&d_loss, sizeof(float));
   check_cuda("malloc");
 
   cudaMemcpy(d_W, td.h_W.data(), m * n * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_x, td.h_x.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_target, td.h_target.data(), m * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_x, td.h_x.data(), batch * n * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_target, td.h_target.data(), batch * m * sizeof(float), cudaMemcpyHostToDevice);
   // dW and loss will be zeroed in the training loop
   check_cuda("memcpy H2D");
 
@@ -243,7 +261,7 @@ int main() {
 
     // Task 1: Forward (reads W generation)
     pk::Task fwd_task{};
-    pk::LinearForwardArgs fwd_args{.W = d_W, .x = d_x, .y = d_y, .m = m, .n = n};
+    pk::LinearForwardArgs fwd_args{.W = d_W, .x = d_x, .y = d_y, .batch = batch, .m = m, .n = n};
     pk::encode_args(fwd_task, pk::OpCode::LinearForward, fwd_args);
     fwd_task.header.buffer_read_id = kBufW;
     fwd_task.header.buffer_write_id = kBufY;
@@ -256,7 +274,8 @@ int main() {
 
     // Task 2: Loss + dy (depends on forward output)
     pk::Task loss_task{};
-    pk::MSELossArgs loss_args{.y = d_y, .target = d_target, .dy = d_dy, .loss = d_loss, .m = m};
+    pk::MSELossArgs loss_args{
+        .y = d_y, .target = d_target, .dy = d_dy, .loss = d_loss, .batch = batch, .m = m};
     pk::encode_args(loss_task, pk::OpCode::MSELoss, loss_args);
     loss_task.header.buffer_read_id = kBufY;
     loss_task.header.buffer_write_id = kBufGradReady; // part 1 of grad readiness
@@ -282,7 +301,8 @@ int main() {
 
     // Task 4: Backward (dW += outer(dy, x)) depends on grad readiness
     pk::Task bwd_task{};
-    pk::LinearBackwardArgs bwd_args{.dy = d_dy, .x = d_x, .dW = d_dW, .m = m, .n = n};
+    pk::LinearBackwardArgs bwd_args{.dy = d_dy, .x = d_x, .dW = d_dW, .batch = batch, .m = m,
+                                    .n = n};
     pk::encode_args(bwd_task, pk::OpCode::LinearBackward, bwd_args);
     bwd_task.header.buffer_read_id = kBufGradReady;
     bwd_task.header.buffer_write_id = kBufDW;

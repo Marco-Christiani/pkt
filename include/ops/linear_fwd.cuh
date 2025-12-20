@@ -8,14 +8,15 @@
 
 namespace pk {
 
-// Computes y = W @ x
+// Computes y = W @ x for a batch of inputs
 // W: [m, n] row-major
-// x: [n]
-// y: [m]
+// x: [batch, n]
+// y: [batch, m]
 struct LinearForwardArgs {
   const float* W;
   const float* x;
   float* y;
+  int batch;
   int m;
   int n;
 };
@@ -37,12 +38,16 @@ template <> struct OpTraits<OpCode::LinearForward> {
 
     int tid = compute_warp_idx * 32 + lane;
     int total_threads = num_compute_warps * 32;
-    for (int row = tid; row < args.m; row += total_threads) {
+    int total_rows = args.batch * args.m;
+    for (int idx = tid; idx < total_rows; idx += total_threads) {
+      int b = idx / args.m;
+      int row = idx % args.m;
       float sum = 0.0f;
+      const float* x_row = args.x + b * args.n;
       for (int col = 0; col < args.n; ++col) {
-        sum += args.W[row * args.n + col] * args.x[col];
+        sum += args.W[row * args.n + col] * x_row[col];
       }
-      args.y[row] = sum;
+      args.y[b * args.m + row] = sum;
     }
   }
 

@@ -8,13 +8,14 @@
 namespace pk {
 
 // Computes MSE loss and gradient
-// L = sum((y - target)^2) / m
-// dy = 2 * (y - target) / m
+// L = sum((y - target)^2) / (m * batch)
+// dy = 2 * (y - target) / (m * batch)
 struct MSELossArgs {
-  const float* y;      // [m]
-  const float* target; // [m]
-  float* dy;           // [m]
+  const float* y;      // [batch, m]
+  const float* target; // [batch, m]
+  float* dy;           // [batch, m]
   float* loss;         // [1]
+  int batch;
   int m;
 };
 
@@ -36,10 +37,12 @@ template <> struct OpTraits<OpCode::MSELoss> {
     int tid = compute_warp_idx * 32 + lane;
     int total_threads = num_compute_warps * 32;
     float partial_loss = 0.0f;
+    const int elems = args.batch * args.m;
+    const float scale = 2.0f / float(args.batch * args.m);
 
-    for (int i = tid; i < args.m; i += total_threads) {
+    for (int i = tid; i < elems; i += total_threads) {
       float diff = args.y[i] - args.target[i];
-      args.dy[i] = 2.0f * diff / float(args.m);
+      args.dy[i] = scale * diff;
       partial_loss += diff * diff;
     }
 
@@ -48,7 +51,7 @@ template <> struct OpTraits<OpCode::MSELoss> {
     }
 
     if (lane == 0) {
-      atomicAdd(args.loss, partial_loss / float(args.m));
+      atomicAdd(args.loss, partial_loss / float(elems));
     }
   }
 

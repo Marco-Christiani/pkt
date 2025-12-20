@@ -6,14 +6,15 @@
 
 namespace pk {
 
-// Computes weight gradient: dW = outer(dy, x) = dy @ x^T
-// dy: [m]
-// x: [n]
+// Computes weight gradient: dW = sum_b dy_b @ x_b^T
+// dy: [batch, m]
+// x: [batch, n]
 // dW: [m, n] row-major (accumulated)
 struct LinearBackwardArgs {
   const float* dy;
   const float* x;
   float* dW;
+  int batch;
   int m;
   int n;
 };
@@ -40,7 +41,12 @@ template <> struct OpTraits<OpCode::LinearBackward> {
     for (int idx = tid; idx < total_elements; idx += total_threads) {
       int row = idx / args.n;
       int col = idx % args.n;
-      float grad = args.dy[row] * args.x[col];
+      float grad = 0.0f;
+      for (int b = 0; b < args.batch; ++b) {
+        float dyb = args.dy[b * args.m + row];
+        float xb = args.x[b * args.n + col];
+        grad += dyb * xb;
+      }
       atomicAdd(&args.dW[idx], grad);
     }
   }
