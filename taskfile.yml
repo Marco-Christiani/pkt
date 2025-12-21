@@ -43,4 +43,20 @@ tasks:
       - build
     cmds:
       - "{{.DEV}} cmake --build build --target train_linear"
-      - "{{.DEV}} ./build/train_linear"
+      - "{{.DEV}} ./build/train_linear {{.CLI_ARGS}}"
+
+  profile-nsys:
+    desc: Profile train_linear with Nsight Systems (output in logs/)
+    deps:
+      - build
+    cmds:
+      - "mkdir -p logs"
+      - "{{.DEV}} nsys profile -o logs/nsys_train_linear --stats=true ./build/train_linear"
+
+  profile-ncu:
+    desc: Profile train_linear with Nsight Compute (output in logs/)
+    deps:
+      - build
+    cmds:
+      - "mkdir -p logs"
+      - "{{.DEV}} ncu --set full --target-processes all -o logs/ncu_train_linear ./build/train_linear"

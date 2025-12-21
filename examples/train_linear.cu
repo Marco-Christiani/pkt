@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -143,13 +144,149 @@ CPUTrainResult cpu_train_linear(std::vector<float> W,                  // shape 
   return {.W = W, .final_loss = loss_curve.back(), .loss_curve = loss_curve};
 }
 
-int main() {
-  constexpr int m = 64;
-  constexpr int n = 128;
-  constexpr int batch = 16;
-  constexpr int num_steps = 100;
-  constexpr float lr = 0.001f;
-  constexpr int tasks_per_step = 4 + 2; // +2 for zero mem
+int main(int argc, char** argv) {
+  int m = 1024;
+  int n = 1024;
+  int batch = 64;
+  int num_steps = 20;
+  float lr = 0.001f;
+  int fwd_tile_m = 2;
+  int fwd_tile_n = 128;
+  int bwd_tile_m = 64;
+  int bwd_tile_n = 128;
+  int repeats = 1;
+  bool skip_cpu = false;
+
+  auto parse_int = [&](const char* s, int* out) {
+    if (!s || !*s) {
+      return false;
+    }
+    char* end = nullptr;
+    long v = std::strtol(s, &end, 10);
+    if (!end || *end != '\0') {
+      return false;
+    }
+    *out = static_cast<int>(v);
+    return true;
+  };
+
+  auto parse_float = [&](const char* s, float* out) {
+    if (!s || !*s) {
+      return false;
+    }
+    char* end = nullptr;
+    float v = std::strtof(s, &end);
+    if (!end || *end != '\0') {
+      return false;
+    }
+    *out = v;
+    return true;
+  };
+
+  auto usage = [&]() {
+    std::cout << "train_linear options\n";
+    std::cout << "  --m <int>\n";
+    std::cout << "  --n <int>\n";
+    std::cout << "  --batch <int>\n";
+    std::cout << "  --steps <int>\n";
+    std::cout << "  --repeats <int>\n";
+    std::cout << "  --lr <float>\n";
+    std::cout << "  --fwd-tile-n <int>\n";
+    std::cout << "  --fwd-tile-m <int>\n";
+    std::cout << "  --bwd-tile-m <int>\n";
+    std::cout << "  --bwd-tile-n <int>\n";
+    std::cout << "  --skip-cpu\n";
+  };
+
+  for (int i = 1; i < argc; ++i) {
+    const char* a = argv[i];
+    auto need = [&](const char* flag) {
+      if (i + 1 >= argc) {
+        std::cerr << "Missing value for " << flag << "\n";
+        usage();
+        exit(2);
+      }
+      return argv[++i];
+    };
+
+    if (!std::strcmp(a, "--help") || !std::strcmp(a, "-h")) {
+      usage();
+      return 0;
+    } else if (!std::strcmp(a, "--m")) {
+      if (!parse_int(need(a), &m)) {
+        std::cerr << "Bad value for --m\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--n")) {
+      if (!parse_int(need(a), &n)) {
+        std::cerr << "Bad value for --n\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--batch")) {
+      if (!parse_int(need(a), &batch)) {
+        std::cerr << "Bad value for --batch\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--steps")) {
+      if (!parse_int(need(a), &num_steps)) {
+        std::cerr << "Bad value for --steps\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--repeats")) {
+      if (!parse_int(need(a), &repeats)) {
+        std::cerr << "Bad value for --repeats\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--lr")) {
+      if (!parse_float(need(a), &lr)) {
+        std::cerr << "Bad value for --lr\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--fwd-tile-m")) {
+      if (!parse_int(need(a), &fwd_tile_m)) {
+        std::cerr << "Bad value for --fwd-tile-m\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--fwd-tile-n")) {
+      if (!parse_int(need(a), &fwd_tile_n)) {
+        std::cerr << "Bad value for --fwd-tile-n\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--bwd-tile-m")) {
+      if (!parse_int(need(a), &bwd_tile_m)) {
+        std::cerr << "Bad value for --bwd-tile-m\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--bwd-tile-n")) {
+      if (!parse_int(need(a), &bwd_tile_n)) {
+        std::cerr << "Bad value for --bwd-tile-n\n";
+        return 2;
+      }
+    } else if (!std::strcmp(a, "--skip-cpu")) {
+      skip_cpu = true;
+    } else {
+      std::cerr << "Unknown arg " << a << "\n";
+      usage();
+      return 2;
+    }
+  }
+
+  if (m <= 0 || n <= 0 || batch <= 0 || num_steps <= 0 || repeats <= 0) {
+    std::cerr << "m n batch steps must be positive\n";
+    return 2;
+  }
+  if (fwd_tile_m <= 0 || fwd_tile_n <= 0 || bwd_tile_m <= 0 || bwd_tile_n <= 0) {
+    std::cerr << "tile sizes must be positive\n";
+    return 2;
+  }
+
+  const int fwd_tiles_m = (batch + fwd_tile_m - 1) / fwd_tile_m;
+  const int fwd_tiles_n = (m + fwd_tile_n - 1) / fwd_tile_n;
+  const int bwd_tiles_m = (m + bwd_tile_m - 1) / bwd_tile_m;
+  const int bwd_tiles_n = (n + bwd_tile_n - 1) / bwd_tile_n;
+
+  const int tasks_per_step =
+      1 + (fwd_tiles_m * fwd_tiles_n) + 1 + 1 + (bwd_tiles_m * bwd_tiles_n) + 1;
 
   // Dependency buffer ids (tokens only, not tied to physical buffers)
   constexpr uint16_t kBufY = 1;           // Forward output ready
@@ -160,8 +297,15 @@ int main() {
   std::cout << "Megakernel Training Demo\n";
   std::cout << "========================\n";
   std::cout << "Model: y = Wx, W:[" << m << "," << n << "]\n";
+  std::cout << "Batch: " << batch << "\n";
   std::cout << "Steps: " << num_steps << ", LR: " << lr << "\n";
-  std::cout << "Tasks per step: " << tasks_per_step << "\n";
+  std::cout << "Params: " << (static_cast<long long>(m) * static_cast<long long>(n)) << "\n";
+  std::cout << "Tiles: fwd_m " << fwd_tile_m << " fwd_n " << fwd_tile_n << " bwd_m " << bwd_tile_m
+            << " bwd_n " << bwd_tile_n << "\n";
+  std::cout << "Tasks per step: " << tasks_per_step << " (including "
+            << (fwd_tiles_m * fwd_tiles_n) << " forward tiles and "
+            << (bwd_tiles_m * bwd_tiles_n) << " backward tiles)\n";
+  std::cout << "Forward mode: LinearForward (task-decomposed)\n";
   std::cout << "Kernel launches: 1\n\n";
 
   std::mt19937 rng(42);
@@ -187,10 +331,18 @@ int main() {
   float initial_loss = host_mse(h_y0, td.h_target);
   std::cout << "Initial host loss: " << initial_loss << "\n";
 
-  auto cpu_res = cpu_train_linear(td.h_W, td.h_x, td.h_target, batch, m, n, num_steps, lr);
-
-  std::cout << "CPU final loss: " << cpu_res.final_loss << "\n";
-  std::cout << "CPU first step loss: " << cpu_res.loss_curve[0] << "\n";
+  CPUTrainResult cpu_res{.W = td.h_W, .final_loss = 0.0f, .loss_curve = {}};
+  const long long cpu_work = static_cast<long long>(batch) * static_cast<long long>(m) *
+                             static_cast<long long>(n);
+  if (!skip_cpu && cpu_work <= 100000000LL) {
+    cpu_res = cpu_train_linear(td.h_W, td.h_x, td.h_target, batch, m, n, num_steps, lr);
+    std::cout << "CPU final loss: " << cpu_res.final_loss << "\n";
+    if (!cpu_res.loss_curve.empty()) {
+      std::cout << "CPU first step loss: " << cpu_res.loss_curve[0] << "\n";
+    }
+  } else {
+    std::cout << "CPU baseline skipped\n";
+  }
   std::cout << "x[0:5] (sample 0) = ";
   for (int i = 0; i < 5; i++)
     std::cout << td.h_x[i] << " ";
@@ -232,10 +384,6 @@ int main() {
   std::cout << "Launching megakernel with 1 launch (" << tasks_per_step << " tasks per step, "
             << num_blocks << " blocks)...\n";
 
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-
   std::vector<pk::Task> tasks;
   tasks.reserve(num_steps * tasks_per_step);
 
@@ -260,17 +408,35 @@ int main() {
     tasks.push_back(zero_loss_task);
 
     // Task 1: Forward (reads W generation)
-    pk::Task fwd_task{};
-    pk::LinearForwardArgs fwd_args{.W = d_W, .x = d_x, .y = d_y, .batch = batch, .m = m, .n = n};
-    pk::encode_args(fwd_task, pk::OpCode::LinearForward, fwd_args);
-    fwd_task.header.buffer_read_id = kBufW;
-    fwd_task.header.buffer_write_id = kBufY;
-    fwd_task.header.wait_count = ready_w; // ensure latest W update applied
-    fwd_task.header.read_epoch = epoch_w;
-    fwd_task.header.write_epoch = epoch_y + 1;
-    tasks.push_back(fwd_task);
-    ready_y += 1;
-    epoch_y += 1;
+    for (int tm = 0; tm < fwd_tiles_m; ++tm) {
+      int tile_m_start = tm * fwd_tile_m;
+      int tile_m_count = (tile_m_start + fwd_tile_m <= batch) ? fwd_tile_m : (batch - tile_m_start);
+      for (int tn = 0; tn < fwd_tiles_n; ++tn) {
+        int tile_n_start = tn * fwd_tile_n;
+        int tile_n_count = (tile_n_start + fwd_tile_n <= m) ? fwd_tile_n : (m - tile_n_start);
+
+        pk::Task fwd_task{};
+        pk::LinearForwardArgs fwd_args{.W = d_W,
+                                       .x = d_x,
+                                       .y = d_y,
+                                       .batch = batch,
+                                       .m = m,
+                                       .n = n,
+                                       .tile_m_start = tile_m_start,
+                                       .tile_m_count = tile_m_count,
+                                       .tile_n_start = tile_n_start,
+                                       .tile_n_count = tile_n_count};
+        pk::encode_args(fwd_task, pk::OpCode::LinearForward, fwd_args);
+        fwd_task.header.buffer_read_id = kBufW;
+        fwd_task.header.buffer_write_id = kBufY;
+        fwd_task.header.wait_count = ready_w;
+        fwd_task.header.read_epoch = epoch_w;
+        fwd_task.header.write_epoch = epoch_y + 1;
+        tasks.push_back(fwd_task);
+        ready_y += 1;
+        epoch_y += 1;
+      }
+    }
 
     // Task 2: Loss + dy (depends on forward output)
     pk::Task loss_task{};
@@ -299,19 +465,36 @@ int main() {
     ready_grad += 1;
     epoch_grad += 1;
 
-    // Task 4: Backward (dW += outer(dy, x)) depends on grad readiness
-    pk::Task bwd_task{};
-    pk::LinearBackwardArgs bwd_args{.dy = d_dy, .x = d_x, .dW = d_dW, .batch = batch, .m = m,
-                                    .n = n};
-    pk::encode_args(bwd_task, pk::OpCode::LinearBackward, bwd_args);
-    bwd_task.header.buffer_read_id = kBufGradReady;
-    bwd_task.header.buffer_write_id = kBufDW;
-    bwd_task.header.wait_count = ready_grad; // loss + zero_dW complete
-    bwd_task.header.read_epoch = epoch_grad;
-    bwd_task.header.write_epoch = epoch_dw + 1;
-    tasks.push_back(bwd_task);
-    ready_dw += 1;
-    epoch_dw += 1;
+    // Task 4: Backward tiles (dW += outer(dy, x)) depends on grad readiness
+    for (int tm = 0; tm < bwd_tiles_m; ++tm) {
+      int tile_m_start = tm * bwd_tile_m;
+      int tile_m_count = (tile_m_start + bwd_tile_m <= m) ? bwd_tile_m : (m - tile_m_start);
+      for (int tn = 0; tn < bwd_tiles_n; ++tn) {
+        int tile_n_start = tn * bwd_tile_n;
+        int tile_n_count = (tile_n_start + bwd_tile_n <= n) ? bwd_tile_n : (n - tile_n_start);
+
+        pk::Task bwd_task{};
+        pk::LinearBackwardArgs bwd_args{.dy = d_dy,
+                                        .x = d_x,
+                                        .dW = d_dW,
+                                        .batch = batch,
+                                        .m = m,
+                                        .n = n,
+                                        .tile_m_start = tile_m_start,
+                                        .tile_m_count = tile_m_count,
+                                        .tile_n_start = tile_n_start,
+                                        .tile_n_count = tile_n_count};
+        pk::encode_args(bwd_task, pk::OpCode::LinearBackward, bwd_args);
+        bwd_task.header.buffer_read_id = kBufGradReady;
+        bwd_task.header.buffer_write_id = kBufDW;
+        bwd_task.header.wait_count = ready_grad;
+        bwd_task.header.read_epoch = epoch_grad;
+        bwd_task.header.write_epoch = epoch_dw + 1;
+        tasks.push_back(bwd_task);
+        ready_dw += 1;
+        epoch_dw += 1;
+      }
+    }
 
     // Task 5: SGD update (W -= lr * dW) depends on dW for this step
     pk::Task sgd_task{};
@@ -327,53 +510,78 @@ int main() {
     epoch_w += 1;
   }
 
-  cudaEventRecord(start);
-  runtime.submit_tasks(tasks);
-  runtime.launch(num_blocks);
-  runtime.synchronize();
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
 
-  float elapsed_ms;
-  cudaEventElapsedTime(&elapsed_ms, start, stop);
+  double mean_ms = 0.0;
+  double m2_ms = 0.0;
+  int count_ms = 0;
 
-  // Read final loss
-  float h_loss;
-  cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost);
+  float last_h_loss = 0.0f;
+  float last_host_recomputed_loss = 0.0f;
 
-  // Recompute loss on host using trained GPU weights for a stable comparison
-  std::vector<float> h_W_out(m * n);
-  cudaMemcpy(h_W_out.data(), d_W, m * n * sizeof(float), cudaMemcpyDeviceToHost);
+  for (int rep = 0; rep < repeats; ++rep) {
+    cudaMemcpy(d_W, td.h_W.data(), m * n * sizeof(float), cudaMemcpyHostToDevice);
 
-  std::vector<float> h_y_final(m);
-  for (int i = 0; i < m; ++i) {
-    float acc = 0.f;
-    const float* Wi = &h_W_out[i * n];
-    for (int j = 0; j < n; ++j)
-      acc += Wi[j] * td.h_x[j];
-    h_y_final[i] = acc;
+    runtime.submit_tasks(tasks);
+    cudaEventRecord(start);
+    runtime.launch(num_blocks);
+    runtime.synchronize();
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+    const float step_ms = elapsed_ms / static_cast<float>(num_steps);
+
+    count_ms += 1;
+    const double delta = step_ms - mean_ms;
+    mean_ms += delta / static_cast<double>(count_ms);
+    m2_ms += delta * (step_ms - mean_ms);
+
+    cudaMemcpy(&last_h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost);
+
+    std::vector<float> h_W_out(m * n);
+    cudaMemcpy(h_W_out.data(), d_W, m * n * sizeof(float), cudaMemcpyDeviceToHost);
+
+    std::vector<float> h_y_final(m);
+    for (int i = 0; i < m; ++i) {
+      float acc = 0.f;
+      const float* Wi = &h_W_out[i * n];
+      for (int j = 0; j < n; ++j)
+        acc += Wi[j] * td.h_x[j];
+      h_y_final[i] = acc;
+    }
+    last_host_recomputed_loss = host_mse(h_y_final, td.h_target);
+
+    std::cout << "\nResults:\n";
+    std::cout << "--------\n";
+    std::cout << "Repeat: " << (rep + 1) << " of " << repeats << "\n";
+    std::cout << "Time: " << elapsed_ms << " ms\n";
+    std::cout << "Time per step: " << step_ms << " ms\n";
+    std::cout << "Final loss (device accumulation): " << last_h_loss << "\n";
+    std::cout << "Final loss (host recompute): " << last_host_recomputed_loss << "\n";
+
+    const bool decreased =
+        last_host_recomputed_loss < initial_loss && std::isfinite(last_host_recomputed_loss);
+    if (decreased) {
+      std::cout << "SUCCESS: loss decreased (" << initial_loss << " -> " << last_host_recomputed_loss
+                << ")\n";
+    } else {
+      std::cout << "NOTE: loss did not decrease (" << initial_loss << " -> " << last_host_recomputed_loss
+                << ")\n";
+    }
   }
-  float host_recomputed_loss = host_mse(h_y_final, td.h_target);
 
-  std::cout << "\nResults:\n";
+  const double stdev_ms = (count_ms > 1) ? std::sqrt(m2_ms / static_cast<double>(count_ms - 1))
+                                        : 0.0;
+
+  std::cout << "\nSummary:\n";
   std::cout << "--------\n";
-  std::cout << "Time: " << elapsed_ms << " ms\n";
-  std::cout << "Time per step: " << (elapsed_ms / num_steps) << " ms\n";
-  std::cout << "Final loss (device accumulation): " << h_loss << "\n";
-  std::cout << "Final loss (host recompute): " << host_recomputed_loss << "\n";
-  std::cout << "CPU final loss: " << cpu_res.final_loss << "\n";
-
-  // Validation
-  // Note: loss accumulates across all steps, so we check it's finite and reasonable
-  const bool decreased = host_recomputed_loss < initial_loss && std::isfinite(host_recomputed_loss);
-  if (decreased) {
-    std::cout << "SUCCESS: loss decreased (" << initial_loss << " -> " << host_recomputed_loss
-              << ")\n";
-  } else {
-    std::cout << "NOTE: loss did not decrease (" << initial_loss << " -> "
-              << host_recomputed_loss
-              << "). Try tweaking lr/steps if you want closer CPU parity.\n";
-  }
+  std::cout << "Repeats: " << repeats << "\n";
+  std::cout << "Mean time per step: " << mean_ms << " ms\n";
+  std::cout << "Stdev time per step: " << stdev_ms << " ms\n";
 
   cudaFree(d_W);
   cudaFree(d_x);
