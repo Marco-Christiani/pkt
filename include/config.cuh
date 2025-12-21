@@ -39,7 +39,11 @@ struct Config {
   static constexpr int kLinearFwdThreadNFrag = 4;
   static constexpr int kLinearBwdThreadNFrag = 4;
 
+#if defined(PK_USE_TENSOR_CORES)
+  static constexpr bool kUseTensorCores = true;
+#else
   static constexpr bool kUseTensorCores = false;
+#endif
 };
 
 // Warp role helpers
