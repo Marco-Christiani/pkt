@@ -50,4 +50,4 @@ template <> struct OpTraits<OpCode::Axpy> {
   }
 };
 
-} // namespace mk
+} // namespace pk
