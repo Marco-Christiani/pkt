@@ -4,6 +4,8 @@ version: "3"
 
 vars:
   DEV: nix develop .#default -c
+  PROF: nix develop .#profiling -c
+  PROFILE_DIR: profiling
 
 tasks:
   build:
@@ -46,17 +48,25 @@ tasks:
       - "{{.DEV}} ./build/train_linear {{.CLI_ARGS}}"
 
   profile-nsys:
-    desc: Profile train_linear with Nsight Systems (output in logs/)
+    desc: Profile train_linear with Nsight Systems (output in profiling/)
     deps:
       - build
     cmds:
-      - "mkdir -p logs"
-      - "{{.DEV}} nsys profile -o logs/nsys_train_linear --stats=true ./build/train_linear"
+      - "mkdir -p {{.PROFILE_DIR}}"
+      - "{{.PROF}} bash -lc 'set -euo pipefail; timeout 180s nsys profile -t cuda,nvtx,osrt --stats=true -o {{.PROFILE_DIR}}/nsys_train_linear --force-overwrite true ./build/train_linear {{.CLI_ARGS}}'"
 
   profile-ncu:
-    desc: Profile train_linear with Nsight Compute (output in logs/)
+    desc: Profile train_linear with Nsight Compute (output in profiling/)
     deps:
       - build
     cmds:
-      - "mkdir -p logs"
-      - "{{.DEV}} ncu --set full --target-processes all -o logs/ncu_train_linear ./build/train_linear"
+      - "mkdir -p {{.PROFILE_DIR}}"
+      - "{{.PROF}} bash -lc 'set -euo pipefail; export HOME=/tmp/pkt_ncu_home; mkdir -p \"$HOME\"; NCU_BIN=\"$(readlink -f \"$(command -v ncu)\")\"; NCU_ROOT=\"$(dirname \"$(dirname \"$NCU_BIN\")\")\"; SECTIONS=\"$NCU_ROOT/sections\"; timeout 120s ncu --config-file 0 --section-folder-recursive \"$SECTIONS\" --set full -k persistent_kernel --launch-count 1 --target-processes all -f --page details --print-details all -o {{.PROFILE_DIR}}/ncu_train_linear ./build/train_linear {{.CLI_ARGS}}'"
+
+  profile-ncu-basic:
+    desc: Quick NCU (basic set) on persistent_kernel (output in profiling/)
+    deps:
+      - build
+    cmds:
+      - "mkdir -p {{.PROFILE_DIR}}"
+      - "{{.PROF}} bash -lc 'set -euo pipefail; export HOME=/tmp/pkt_ncu_home; mkdir -p \"$HOME\"; NCU_BIN=\"$(readlink -f \"$(command -v ncu)\")\"; NCU_ROOT=\"$(dirname \"$(dirname \"$NCU_BIN\")\")\"; SECTIONS=\"$NCU_ROOT/sections\"; timeout 600s ncu --config-file 0 --section-folder-recursive \"$SECTIONS\" --set basic -k persistent_kernel --launch-count 1 --target-processes all -f --page details --print-details all -o {{.PROFILE_DIR}}/ncu_train_linear_basic ./build/train_linear {{.CLI_ARGS}}'"
