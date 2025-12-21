@@ -19,6 +19,11 @@ namespace pk {
 //   Single dispatch: 1 function * 300 bytes = I-cache thrashing
 //   Three dispatches: 3 functions * 100 bytes = better locality
 
+__device__ inline void dispatch_load(const Task& task, BlockRuntime& br, int slot_idx, int lane);
+__device__ inline void dispatch_compute(const Task& task, BlockRuntime& br, int slot_idx, int lane,
+                                        int compute_warp_idx, int num_compute_warps);
+__device__ inline void dispatch_store(const Task& task, BlockRuntime& br, int slot_idx, int lane);
+
 // Load phase dispatch
 // Called by loader warp to prefetch data
 __device__ inline void dispatch_load(const Task& task, BlockRuntime& br, int slot_idx, int lane) {

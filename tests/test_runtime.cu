@@ -13,6 +13,9 @@ using namespace pk;
 using namespace pk::test;
 
 bool test_runtime_init() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   Runtime runtime;
   runtime.initialize(100);
 
@@ -20,6 +23,9 @@ bool test_runtime_init() {
 }
 
 bool test_empty_task_list() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   Runtime runtime;
   runtime.initialize(10);
 
@@ -32,6 +38,9 @@ bool test_empty_task_list() {
 }
 
 bool test_get_num_sms() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   int num_sms = Runtime::get_num_sms();
 
   // Should be positive and reasonable (eg 1-128+ SMs)
@@ -42,6 +51,9 @@ bool test_get_num_sms() {
 }
 
 bool test_multi_sm_execution() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int num_tasks = 256;
   constexpr int n = 512;
 
@@ -97,6 +109,9 @@ bool test_multi_sm_execution() {
 }
 
 bool test_task_resubmission() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int n = 256;
 
   std::vector<float> h_x(n);
@@ -157,6 +172,9 @@ bool test_task_resubmission() {
 }
 
 bool test_varying_block_counts() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int num_tasks = 128;
   constexpr int n = 256;
 
@@ -227,6 +245,9 @@ bool test_varying_block_counts() {
 
 // Test queue chunking with task count not divisible by chunk size
 bool test_non_aligned_task_count() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   // Config::kChunkSize is 32, test with 100 tasks
   constexpr int num_tasks = 100;
   constexpr int n = 128;
@@ -280,6 +301,9 @@ bool test_non_aligned_task_count() {
 }
 
 bool test_large_task_count() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int num_tasks = 5000;
   constexpr int n = 64;
 

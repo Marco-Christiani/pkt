@@ -85,6 +85,21 @@ inline int run_tests(TestCase* tests, int num_tests) {
   return (failed == 0) ? 0 : 1;
 }
 
+inline bool cuda_is_available() {
+  int count = 0;
+  cudaError_t err = cudaGetDeviceCount(&count);
+  if (err != cudaSuccess || count <= 0) {
+    cudaGetLastError();
+    return false;
+  }
+  err = cudaFree(0);
+  if (err != cudaSuccess) {
+    cudaGetLastError();
+    return false;
+  }
+  return true;
+}
+
 template <typename T> T* alloc_device(int count) {
   T* ptr;
   CUDA_CHECK(cudaMalloc(&ptr, count * sizeof(T)));

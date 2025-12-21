@@ -38,4 +38,4 @@ __device__ inline Task* get_task(GlobalQueue* queue, int index) {
   return &queue->tasks[index];
 }
 
-} // namespace mk
+} // namespace pk

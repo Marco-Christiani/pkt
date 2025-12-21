@@ -88,6 +88,9 @@ __global__ void test_ring_advance_kernel(int* results, int num_iterations) {
 }
 
 bool test_ring_advance_device() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   const int num_iterations = 12;
   int* d_results = alloc_device<int>(num_iterations);
 
@@ -124,6 +127,9 @@ __global__ void test_warp_roles_kernel(int* results) {
 }
 
 bool test_warp_role_identification() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   int* d_results = alloc_device_zero<int>(Config::kTotalWarps * 4);
 
   test_warp_roles_kernel<<<1, Config::kThreadsPerBlock>>>(d_results);
@@ -179,6 +185,9 @@ __global__ void test_thread_ids_kernel(int* lane_ids, int* warp_ids) {
 
 // Test lane_id and warp_id helpers
 bool test_thread_id_helpers() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   int* d_lane_ids = alloc_device<int>(Config::kThreadsPerBlock);
   int* d_warp_ids = alloc_device<int>(Config::kThreadsPerBlock);
 

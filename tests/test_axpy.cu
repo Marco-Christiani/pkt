@@ -11,6 +11,9 @@ using namespace pk;
 using namespace pk::test;
 
 bool test_single_axpy() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int n = 1024;
 
   // Host data
@@ -69,6 +72,9 @@ bool test_single_axpy() {
 }
 
 bool test_multiple_axpy() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int num_tasks = 100;
   constexpr int n = 1024;
 
@@ -131,6 +137,9 @@ bool test_multiple_axpy() {
 }
 
 bool test_varying_sizes() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   int sizes[] = {32, 128, 512, 1024, 2048};
   int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
@@ -191,6 +200,9 @@ bool test_varying_sizes() {
 
 // Test with alpha = 0 (should just copy y)
 bool test_alpha_zero() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int n = 256;
 
   std::vector<float> h_x(n, 1.0f);
@@ -236,6 +248,9 @@ bool test_alpha_zero() {
 
 // Test with negative alpha
 bool test_negative_alpha() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int n = 512;
 
   std::vector<float> h_x(n);
@@ -286,6 +301,9 @@ bool test_negative_alpha() {
 
 // Test many small tasks to stress the queue
 bool test_many_small_tasks() {
+  if (!cuda_is_available()) {
+    return true;
+  }
   constexpr int num_tasks = 1000;
   constexpr int n = 32;
 

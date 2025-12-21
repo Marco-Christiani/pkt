@@ -28,11 +28,18 @@ struct Config {
   static constexpr int kChunkSize = 32;
 
   // Paging configuration for SMEM staging
-  // For ops that need staging, consider cooperative groups or lockstep phases.
-  static constexpr int kPagesPerSlot = 0;
-  static constexpr int kMaxLogicalPages = 0; // 0 = paging disabled
-  static constexpr int kPageWords = 0;
-  static constexpr int kPageBytes = 0;
+  // Enable when using tiled ops that stage into SMEM pages.
+  static constexpr int kPagesPerSlot = 2;     // two pages for ping-pong
+  static constexpr int kMaxLogicalPages = kPipelineStages * kPagesPerSlot;
+  static constexpr int kPageWords = 1024;     // 4 KB per page to hold x tiles up to 1024
+  static constexpr int kPageBytes = kPageWords * sizeof(int);
+
+  // GEMM friendly chunking
+  static constexpr int kGemmKChunk = 16;
+  static constexpr int kLinearFwdThreadNFrag = 4;
+  static constexpr int kLinearBwdThreadNFrag = 4;
+
+  static constexpr bool kUseTensorCores = false;
 };
 
 // Warp role helpers
@@ -73,4 +80,4 @@ __device__ inline int compute_warp_index(int wid, const WarpRoles& roles) {
   return wid - roles.first_compute;
 }
 
-} // namespace mk
+} // namespace pk
