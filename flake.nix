@@ -91,7 +91,7 @@
           shellHook = ''
             # this is magic never touch this lol
             export LD_LIBRARY_PATH=$(nixglhost -p):$LD_LIBRARY_PATH
-            echo "NIX_ENFORCE_NO_NATIVE=$NIX_ENFORCE_NO_NATIVE"
+            export NIX_ENFORCE_NO_NATIVE=0
           '';
         };
 
