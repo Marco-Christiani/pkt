@@ -46,6 +46,48 @@ struct Config {
 #endif
 };
 
+// Experiment toggles (profiling / framework)
+// Keep defaults conservative and correctness-preserving.
+#ifndef PK_DEP_POLL_ATOMIC_LOAD
+#define PK_DEP_POLL_ATOMIC_LOAD 1
+#endif
+
+#ifndef PK_CONTROLLER_SKIP_BLOCKED
+#define PK_CONTROLLER_SKIP_BLOCKED 0
+#endif
+
+#ifndef PK_CLAIMED_READY_FIRST
+#define PK_CLAIMED_READY_FIRST 0
+#endif
+
+#ifndef PK_SEGMENT_GATE
+#define PK_SEGMENT_GATE 0
+#endif
+
+#ifndef PK_SEGMENT_WINDOW_SIZE
+#define PK_SEGMENT_WINDOW_SIZE 4
+#endif
+
+#ifndef PK_SEGMENT_WINDOW_MAX
+#define PK_SEGMENT_WINDOW_MAX 16
+#endif
+
+#ifndef PK_PROFILE_RANGES
+#define PK_PROFILE_RANGES 0
+#endif
+
+#ifndef PK_RELAX_PUBLISH_FENCE
+#define PK_RELAX_PUBLISH_FENCE 0
+#endif
+
+#ifndef PK_TASK_ACCOUNTING
+#define PK_TASK_ACCOUNTING 0
+#endif
+
+#ifndef PK_PERF_COUNTERS
+#define PK_PERF_COUNTERS 0
+#endif
+
 // Warp role helpers
 struct WarpRoles {
   int controller{Config::kControllerWarp};

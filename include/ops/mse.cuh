@@ -22,11 +22,15 @@ struct MSELossArgs {
 template <> struct OpTraits<OpCode::MSELoss> {
   using Args = MSELossArgs;
 
-  __device__ static void load(const Args& args, BlockRuntime& br, int slot_idx, int lane) {
+  __device__ static void load(const Args& args, BlockRuntime& br, int slot_idx, int lane,
+                              unsigned long long* page_reuse_hits,
+                              unsigned long long* page_refill_count) {
     (void)args;
     (void)br;
     (void)slot_idx;
     (void)lane;
+    (void)page_reuse_hits;
+    (void)page_refill_count;
   }
 
   __device__ static void compute(const Args& args, BlockRuntime& br, int slot_idx, int lane,

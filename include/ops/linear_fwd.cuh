@@ -191,7 +191,9 @@ template <> struct OpTraits<OpCode::LinearForward> {
     }
   }
 
-  __device__ static void load(const Args& args, BlockRuntime& br, int slot_idx, int lane) {
+  __device__ static void load(const Args& args, BlockRuntime& br, int slot_idx, int lane,
+                              unsigned long long* page_reuse_hits,
+                              unsigned long long* page_refill_count) {
     constexpr int kTileM = 2;
     constexpr int kKMax = (Config::kPageBytes / sizeof(__half)) / kTileM;
 
@@ -213,7 +215,13 @@ template <> struct OpTraits<OpCode::LinearForward> {
     const unsigned long long tag = make_page_tag(args.x, args.tile_m_start, args.tile_m_count,
                                                  br.slot(slot_idx).task.header.read_epoch);
     if (br.page_is_ready_with_tag(x_page, tag)) {
+      if (lane == 0 && page_reuse_hits) {
+        *page_reuse_hits += 1;
+      }
       return;
+    }
+    if (lane == 0 && page_refill_count) {
+      *page_refill_count += 1;
     }
 
     br.page_wait_begin_overwrite(x_page);
@@ -292,42 +300,101 @@ template <> struct OpTraits<OpCode::LinearForward> {
                                                     valid_rows, valid_cols);
       }
     } else {
-      int tid = compute_warp_idx * 32 + lane;
-      int total_threads = num_compute_warps * 32;
+      // Scalar path: prioritize coalescing for W loads.
+      // For row-major W[out_col, k], coalescing happens when warp lanes vary k (not out_col).
+      // Here, we split the warp into 4 groups of 8 lanes; each group computes 1 output column
+      // at a time, with lanes in the group cooperatively loading contiguous k.
+      constexpr int kColsPerWarp = 32;
+      constexpr int kLaneGroupSize = 8;
+      constexpr int kColsPerIter = 4; // one column per lane-group
 
-      for (int n_local_base = tid * kNFrag; n_local_base < args.tile_n_count;
-           n_local_base += total_threads * kNFrag) {
-        const int out_col_base = args.tile_n_start + n_local_base;
-        if (out_col_base >= args.m) {
+      const int slice_start = compute_warp_idx * kColsPerWarp;
+      if (slice_start >= args.tile_n_count) {
+        return;
+      }
+
+      const int lane_group = lane / kLaneGroupSize;           // 0..3
+      const int lane_in_group = lane & (kLaneGroupSize - 1);  // 0..7
+      const unsigned group_mask = 0xFFu << (lane_group * kLaneGroupSize);
+
+      const int b0 = args.tile_m_start;
+      if (b0 >= args.batch || args.tile_m_count <= 0) {
+        return;
+      }
+      const int b1 = b0 + 1;
+      const bool has_b1 = (args.tile_m_count > 1) && (b1 < args.batch);
+
+      for (int col_iter = 0; col_iter < kColsPerWarp; col_iter += kColsPerIter) {
+        const int n_local = slice_start + col_iter + lane_group;
+        if (n_local >= args.tile_n_count) {
           continue;
         }
 
-        const int max_cols_from_tile = args.tile_n_count - n_local_base;
-        const int max_cols_from_tensor = args.m - out_col_base;
-        const int valid_cols = (max_cols_from_tile < max_cols_from_tensor) ? max_cols_from_tile
-                                                                           : max_cols_from_tensor;
-        if (valid_cols <= 0) {
+        const int out_col = args.tile_n_start + n_local;
+        if (out_col >= args.m) {
           continue;
         }
 
-        RTile2D<float, kTileM, kNFrag> acc;
-        acc.clear(0.0f);
+        float acc0 = 0.0f;
+        float acc1 = 0.0f;
 
+        const float* Wrow = args.W + out_col * args.n;
         const int n = args.n;
-        for (int k0 = 0; k0 < n; k0 += kKChunk) {
-          const int k_rem = n - k0;
-          const int k_valid = (k_rem < kKChunk) ? k_rem : kKChunk;
 
-          accumulate_kchunk<Config::kUseTensorCores, kTileM, kNFrag, kKChunk>(
-              acc, args, x_st, out_col_base, valid_cols, k0, k_valid);
+        const __half* x0 = smem_x + 0 * kKMax;
+        const __half* x1 = smem_x + 1 * kKMax;
+
+        // Each of the 8 lanes loads a float4, covering 32 contiguous k values per iteration.
+        constexpr int kLaneK = 4;
+        constexpr int kKStep = kLaneGroupSize * kLaneK; // 32
+
+#pragma unroll 1
+        for (int k0 = 0; k0 < n; k0 += kKStep) {
+          const int k_base = k0 + lane_in_group * kLaneK;
+          if (k_base + 3 < n) {
+            const float4 wv = reinterpret_cast<const float4*>(Wrow + k_base)[0];
+
+            const __half2 hx0a = reinterpret_cast<const __half2*>(x0 + k_base)[0];
+            const __half2 hx0b = reinterpret_cast<const __half2*>(x0 + k_base)[1];
+            const float2 fx0a = __half22float2(hx0a);
+            const float2 fx0b = __half22float2(hx0b);
+            acc0 += wv.x * fx0a.x + wv.y * fx0a.y + wv.z * fx0b.x + wv.w * fx0b.y;
+
+            if (has_b1) {
+              const __half2 hx1a = reinterpret_cast<const __half2*>(x1 + k_base)[0];
+              const __half2 hx1b = reinterpret_cast<const __half2*>(x1 + k_base)[1];
+              const float2 fx1a = __half22float2(hx1a);
+              const float2 fx1b = __half22float2(hx1b);
+              acc1 += wv.x * fx1a.x + wv.y * fx1a.y + wv.z * fx1b.x + wv.w * fx1b.y;
+            }
+          } else {
+#pragma unroll
+            for (int kk = 0; kk < kLaneK; ++kk) {
+              const int k = k_base + kk;
+              if (k >= n) {
+                continue;
+              }
+              const float w = Wrow[k];
+              acc0 += w * __half2float(x0[k]);
+              if (has_b1) {
+                acc1 += w * __half2float(x1[k]);
+              }
+            }
+          }
         }
 
-        const int b0 = args.tile_m_start + 0;
-        const int valid_rows = (args.tile_m_count < kTileM) ? args.tile_m_count : kTileM;
+        // Reduce within our 8-lane group.
+#pragma unroll
+        for (int offset = kLaneGroupSize / 2; offset > 0; offset >>= 1) {
+          acc0 += __shfl_down_sync(group_mask, acc0, offset, kLaneGroupSize);
+          acc1 += __shfl_down_sync(group_mask, acc1, offset, kLaneGroupSize);
+        }
 
-        if (b0 < args.batch && valid_rows > 0) {
-          store_rtile_fragment<float, kTileM, kNFrag>(acc, args.y, args.m, b0, out_col_base,
-                                                      valid_rows, valid_cols);
+        if (lane_in_group == 0) {
+          args.y[b0 * args.m + out_col] = acc0;
+          if (has_b1) {
+            args.y[b1 * args.m + out_col] = acc1;
+          }
         }
       }
     }

@@ -19,49 +19,56 @@ namespace pk {
 //   Single dispatch: 1 function * 300 bytes = I-cache thrashing
 //   Three dispatches: 3 functions * 100 bytes = better locality
 
-__device__ inline void dispatch_load(const Task& task, BlockRuntime& br, int slot_idx, int lane);
+__device__ inline void dispatch_load(const Task& task, BlockRuntime& br, int slot_idx, int lane,
+                                     unsigned long long* page_reuse_hits,
+                                     unsigned long long* page_refill_count);
 __device__ inline void dispatch_compute(const Task& task, BlockRuntime& br, int slot_idx, int lane,
                                         int compute_warp_idx, int num_compute_warps);
 __device__ inline void dispatch_store(const Task& task, BlockRuntime& br, int slot_idx, int lane);
 
 // Load phase dispatch
 // Called by loader warp to prefetch data
-__device__ inline void dispatch_load(const Task& task, BlockRuntime& br, int slot_idx, int lane) {
+__device__ inline void dispatch_load(const Task& task, BlockRuntime& br, int slot_idx, int lane,
+                                     unsigned long long* page_reuse_hits,
+                                     unsigned long long* page_refill_count) {
   switch (task.header.opcode) {
     case OpCode::ZeroMemory: {
       const auto& args = decode_args<OpTraits<OpCode::ZeroMemory>::Args>(task);
-      OpTraits<OpCode::ZeroMemory>::load(args, br, slot_idx, lane);
+      OpTraits<OpCode::ZeroMemory>::load(args, br, slot_idx, lane, page_reuse_hits,
+                                         page_refill_count);
       break;
     }
     case OpCode::Axpy: {
       const auto& args = decode_args<OpTraits<OpCode::Axpy>::Args>(task);
-      OpTraits<OpCode::Axpy>::load(args, br, slot_idx, lane);
+      OpTraits<OpCode::Axpy>::load(args, br, slot_idx, lane, page_reuse_hits, page_refill_count);
       break;
     }
 
     case OpCode::Gemm: {
       // const auto& args = decode_args<OpTraits<OpCode::Gemm>::Args>(task);
-      // OpTraits<OpCode::Gemm>::load(args, br, slot_idx, lane);
+      // OpTraits<OpCode::Gemm>::load(args, br, slot_idx, lane, page_reuse_hits, page_refill_count);
       break;
     }
     case OpCode::LinearForward: {
       const auto& args = decode_args<OpTraits<OpCode::LinearForward>::Args>(task);
-      OpTraits<OpCode::LinearForward>::load(args, br, slot_idx, lane);
+      OpTraits<OpCode::LinearForward>::load(args, br, slot_idx, lane, page_reuse_hits,
+                                            page_refill_count);
       break;
     }
     case OpCode::MSELoss: {
       const auto& args = decode_args<OpTraits<OpCode::MSELoss>::Args>(task);
-      OpTraits<OpCode::MSELoss>::load(args, br, slot_idx, lane);
+      OpTraits<OpCode::MSELoss>::load(args, br, slot_idx, lane, page_reuse_hits, page_refill_count);
       break;
     }
     case OpCode::LinearBackward: {
       const auto& args = decode_args<OpTraits<OpCode::LinearBackward>::Args>(task);
-      OpTraits<OpCode::LinearBackward>::load(args, br, slot_idx, lane);
+      OpTraits<OpCode::LinearBackward>::load(args, br, slot_idx, lane, page_reuse_hits,
+                                             page_refill_count);
       break;
     }
     case OpCode::SGDUpdate: {
       const auto& args = decode_args<OpTraits<OpCode::SGDUpdate>::Args>(task);
-      OpTraits<OpCode::SGDUpdate>::load(args, br, slot_idx, lane);
+      OpTraits<OpCode::SGDUpdate>::load(args, br, slot_idx, lane, page_reuse_hits, page_refill_count);
       break;
     }
 

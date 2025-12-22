@@ -29,7 +29,9 @@ struct LinearBackwardArgs {
 template <> struct OpTraits<OpCode::LinearBackward> {
   using Args = LinearBackwardArgs;
 
-  __device__ static void load(const Args& args, BlockRuntime& br, int slot_idx, int lane) {
+  __device__ static void load(const Args& args, BlockRuntime& br, int slot_idx, int lane,
+                              unsigned long long* page_reuse_hits,
+                              unsigned long long* page_refill_count) {
     constexpr int kRowsPerPage = 32;
     constexpr int kBatchMax = (Config::kPageBytes / sizeof(__half)) / kRowsPerPage;
     constexpr int kMaxTileM = 2 * kRowsPerPage;
@@ -52,7 +54,13 @@ template <> struct OpTraits<OpCode::LinearBackward> {
     const unsigned long long tag = make_page_tag(args.dy, args.tile_m_start, args.tile_m_count, epoch);
 
     if (br.page_is_ready_with_tag(dy_page0, tag) && br.page_is_ready_with_tag(dy_page1, tag)) {
+      if (lane == 0 && page_reuse_hits) {
+        *page_reuse_hits += 1;
+      }
       return;
+    }
+    if (lane == 0 && page_refill_count) {
+      *page_refill_count += 2;
     }
 
     br.page_wait_begin_overwrite(dy_page0);
@@ -124,34 +132,22 @@ template <> struct OpTraits<OpCode::LinearBackward> {
       RTile2D<float, 1, kNFrag> grad;
       grad.clear(0.0f);
 
-      float dy_chunk[kKChunk];
       for (int b0 = 0; b0 < args.batch; b0 += kKChunk) {
         const int b_rem = args.batch - b0;
         const int b_valid = (b_rem < kKChunk) ? b_rem : kKChunk;
-
-#pragma unroll
-        for (int kk = 0; kk < kKChunk; ++kk) {
-          dy_chunk[kk] = 0.0f;
-        }
-
         const int dy_r = (r < kRowsPerPage) ? r : (r - kRowsPerPage);
-#pragma unroll
-        for (int kk = 0; kk < kKChunk; ++kk) {
-          if (kk >= b_valid) {
-            continue;
-          }
-          __half dyh = (r < kRowsPerPage) ? dy0(dy_r, b0 + kk) : dy1(dy_r, b0 + kk);
-          dy_chunk[kk] = __half2float(dyh);
-        }
+
+        for (int kk = 0; kk < b_valid; ++kk) {
+          const __half dyh = (r < kRowsPerPage) ? dy0(dy_r, b0 + kk) : dy1(dy_r, b0 + kk);
+          const float dyf = __half2float(dyh);
+          const float* x_row = args.x + (b0 + kk) * args.n + col_base;
 
 #pragma unroll
-        for (int c = 0; c < kNFrag; ++c) {
-          if (c >= valid_cols) {
-            continue;
-          }
-          const int col = col_base + c;
-          for (int kk = 0; kk < b_valid; ++kk) {
-            grad(0, c) += dy_chunk[kk] * args.x[(b0 + kk) * args.n + col];
+          for (int c = 0; c < kNFrag; ++c) {
+            if (c >= valid_cols) {
+              continue;
+            }
+            grad(0, c) += dyf * x_row[c];
           }
         }
       }
