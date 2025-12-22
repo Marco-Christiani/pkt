@@ -6,5 +6,8 @@ compile_commands.json
 scratch
 subprojects
 build_tc/
+build_*/
+build*/
 experimentabl
 experimental
+profiling/
