@@ -11,3 +11,6 @@ build*/
 experimentabl
 experimental
 profiling/
+internal-docs/
+README.md
+*.md
